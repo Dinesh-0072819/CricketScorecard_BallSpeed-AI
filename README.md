@@ -88,7 +88,8 @@ All movement analysis tunables are centralized in [config.py](file:///Users/dine
 ## 🔌 API Endpoints & Fields
 
 ### Core Endpoints
-- **`POST /upload`**: Process an uploaded cricket video. Accepts `batsman_hand` (`"RIGHT"` or `"LEFT"`) and `profile`. Returns `delivery_analysis` alongside speed metrics.
+- **`POST /upload`**: Process an uploaded cricket video. Accepts `batsman_hand` (`"RIGHT"` or `"LEFT"`), `calibration_profile`, and `max_speed`. Returns `delivery_analysis`, `deliveries` (array of all deliveries with `index`, `start_time_s`, `end_time_s`, `speed_kmh`, `analysis`, `bounce_px`), `summary` (`total_deliveries`, `avg_speed`, `spin_count`, `swing_count`, `length_distribution`), and `processed_video_url` (browser-playable H.264 MP4 with overlays for all deliveries).
+- **`GET /api/upload/status`**: Returns real-time processing progress percentage and status message (`percent`, `status`, `message`).
 - **`POST /process_frame`**: Process live camera stream frame. Accepts base64 image and `batsman_hand`.
 - **`POST /api/match/ball`**: Record a ball in the match scorecard with optional delivery movement parameters (`delivery_type`, `spin_type`, `turn_angle_deg`, `swing_cm`, `bounce_x`, `bounce_y`, `length`, `line`, `analysis_confidence`).
 - **`GET /api/match/deliveries?match_id=<id>`**: Returns list of all analysed deliveries with bounce coordinates for pitch map visualization.
@@ -137,9 +138,13 @@ CricSpeedAI/
 ├── frontend/                  # React 18 + Vite dark glassmorphic UI
 │   └── src/components/
 │       ├── DeliveryAnalysisCard.jsx # Movement badge, metrics, XAI accordion
+│       ├── DeliveryTypeBadge.jsx    # Canonical delivery type badges & color map
+│       ├── BatsmanHandToggle.jsx    # RHB/LHB toggle with localStorage persistence
 │       ├── PitchMap.jsx             # Responsive SVG pitch map with bounce dots
-│       ├── LiveCameraRadar.jsx      # Live stream radar with RHB/LHB toggle
+│       ├── LiveCameraRadar.jsx      # Live stream radar with RHB/LHB toggle & last 6 strip
 │       ├── LiveScorecard.jsx        # Ball-by-ball score recording with auto-link
+│       ├── VideoUpload.jsx          # Multi-delivery analyzer, video player & export
+│       ├── MatchSummaryView.jsx     # Match archives with ball-by-ball movement table
 │       └── AnalyticsDashboard.jsx   # Match & Bowler movement analytics
 ├── tools/
 │   ├── calibrate_pitch.py     # 4-point homography calibration utility

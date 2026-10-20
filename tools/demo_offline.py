@@ -159,7 +159,8 @@ def main():
             "maximum_speed_kmh": res.get("speed", 0.0),
             "batsman_hand": args.batsman_hand,
             "delivery_analysis": res.get("delivery_analysis"),
-            "all_deliveries": res.get("deliveries", [])
+            "all_deliveries": res.get("deliveries", []),
+            "summary": res.get("summary", {})
         }
 
         print("\n" + "=" * 60)
