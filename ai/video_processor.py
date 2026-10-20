@@ -82,7 +82,8 @@ class VideoProcessor:
         output_video,
         max_speed=70,
         batsman_hand="RIGHT",
-        calibration_profile=None
+        calibration_profile=None,
+        progress_callback=None
     ):
         from ai.tracker import ByteTracker
         from ai.speed import SpeedEstimator, pixel_to_ground
@@ -96,16 +97,17 @@ class VideoProcessor:
 
         if not cap.isOpened():
             print("ERROR : Cannot open video")
-            return {"speed": 0.0, "status": "ERROR", "delivery_analysis": None}
+            return {"speed": 0.0, "status": "ERROR", "delivery_analysis": None, "deliveries": [], "summary": {}}
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 1:
             fps = 30
 
-        print(f"Video FPS : {fps}")
+        print(f"Video FPS : {fps} | Total Frames : {total_frames}")
 
         active_H = self.H
         if calibration_profile:
@@ -125,7 +127,7 @@ class VideoProcessor:
 
         if not out.isOpened():
             cap.release()
-            return {"speed": 0.0, "status": "ERROR", "delivery_analysis": None}
+            return {"speed": 0.0, "status": "ERROR", "delivery_analysis": None, "deliveries": [], "summary": {}}
 
         # Initialize tracking, speed, and alarm modules
         tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
@@ -134,6 +136,7 @@ class VideoProcessor:
 
         detected_speed = 0.0
         maximum_speed = 0.0
+        delivery_max_speed = 0.0
         status = "SAFE"
         frame_number = 0
 
@@ -252,8 +255,11 @@ class VideoProcessor:
                 lost_frames = 0
                 if not delivery_active and consecutive_tracked >= 3:
                     delivery_active = True
+                    delivery_max_speed = detected_speed
                 if delivery_active:
                     trajectory_buffer.append(point_data)
+                    if detected_speed > delivery_max_speed:
+                        delivery_max_speed = detected_speed
             else:
                 consecutive_tracked = 0
                 if delivery_active:
@@ -269,15 +275,35 @@ class VideoProcessor:
                         cleaned = clean_track(trajectory_buffer)
                         if cleaned:
                             try:
-                                analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=maximum_speed)
+                                d_speed = delivery_max_speed if delivery_max_speed > 0 else (detected_speed if detected_speed > 0 else maximum_speed)
+                                analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=d_speed)
                                 last_delivery_analysis = analysis
                                 last_delivery_points = list(cleaned)
                                 last_delivery_frame = frame_number
-                                deliveries_analyzed.append(analysis)
+
+                                # Determine bounce pixel position
+                                bounce_px = None
+                                if analysis.get("bounce_xy_m"):
+                                    bx, by = analysis["bounce_xy_m"]
+                                    closest_pt = min(cleaned, key=lambda pt: abs(pt["y"] - by))
+                                    bounce_px = [round(closest_pt["px"], 1), round(closest_pt["py"], 1)]
+
+                                start_t = trajectory_buffer[0]["t"]
+                                end_t = trajectory_buffer[-1]["t"]
+                                delivery_record = {
+                                    "index": len(deliveries_analyzed) + 1,
+                                    "start_time_s": round(start_t, 2),
+                                    "end_time_s": round(end_t, 2),
+                                    "speed_kmh": round(d_speed, 1),
+                                    "analysis": analysis,
+                                    "bounce_px": bounce_px
+                                }
+                                deliveries_analyzed.append(delivery_record)
                             except Exception as err:
                                 print(f"Delivery analysis error: {err}")
                     trajectory_buffer = []
                     lost_frames = 0
+                    delivery_max_speed = 0.0
 
             # ---------------- BALL TRAIL DRAWING (Fading Cyan #00f2fe) ----------------
             if ball_found and len(primary_track.smoothed_history) > 1:
@@ -336,8 +362,15 @@ class VideoProcessor:
 
             out.write(annotated)
 
+            if progress_callback and total_frames > 0 and frame_number % 5 == 0:
+                pct = int((frame_number / total_frames) * 85)
+                progress_callback(pct)
+
         cap.release()
         out.release()
+
+        if progress_callback:
+            progress_callback(90)
 
         print()
         print("=" * 50)
@@ -390,11 +423,50 @@ class VideoProcessor:
             cleaned = clean_track(trajectory_buffer)
             if cleaned:
                 try:
-                    analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=maximum_speed)
+                    d_speed = delivery_max_speed if delivery_max_speed > 0 else (detected_speed if detected_speed > 0 else maximum_speed)
+                    analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=d_speed)
                     last_delivery_analysis = analysis
-                    deliveries_analyzed.append(analysis)
+
+                    bounce_px = None
+                    if analysis.get("bounce_xy_m"):
+                        bx, by = analysis["bounce_xy_m"]
+                        closest_pt = min(cleaned, key=lambda pt: abs(pt["y"] - by))
+                        bounce_px = [round(closest_pt["px"], 1), round(closest_pt["py"], 1)]
+
+                    start_t = trajectory_buffer[0]["t"]
+                    end_t = trajectory_buffer[-1]["t"]
+                    delivery_record = {
+                        "index": len(deliveries_analyzed) + 1,
+                        "start_time_s": round(start_t, 2),
+                        "end_time_s": round(end_t, 2),
+                        "speed_kmh": round(d_speed, 1),
+                        "analysis": analysis,
+                        "bounce_px": bounce_px
+                    }
+                    deliveries_analyzed.append(delivery_record)
                 except Exception as err:
                     print(f"Final delivery analysis error: {err}")
+
+        # Compute summary metrics across all analyzed deliveries
+        total_delivs = len(deliveries_analyzed)
+        avg_speed = round(sum(d["speed_kmh"] for d in deliveries_analyzed) / total_delivs, 1) if total_delivs > 0 else round(maximum_speed, 1)
+        spin_count = sum(1 for d in deliveries_analyzed if d.get("analysis", {}).get("spin_type") in ("OFF_SPIN", "LEG_SPIN"))
+        swing_count = sum(1 for d in deliveries_analyzed if d.get("analysis", {}).get("swing_type") in ("INSWING", "OUTSWING"))
+        length_dist = {"Yorker": 0, "Full": 0, "Good Length": 0, "Short": 0}
+        for d in deliveries_analyzed:
+            l = d.get("analysis", {}).get("length")
+            if l in length_dist:
+                length_dist[l] += 1
+            elif l:
+                length_dist[l] = length_dist.get(l, 0) + 1
+
+        summary = {
+            "total_deliveries": total_delivs,
+            "avg_speed": avg_speed,
+            "spin_count": spin_count,
+            "swing_count": swing_count,
+            "length_distribution": length_dist
+        }
 
         print()
         print("=" * 50)
@@ -407,6 +479,7 @@ class VideoProcessor:
         print(f"Speed Limit      : {max_speed:.1f} km/h")
         print(f"Status           : {status}")
         print(f"Output Video     : {output_video}")
+        print(f"Deliveries Found : {total_delivs}")
 
         if self.H is not None:
             print("Distance Mode    : Perspective calibrated")
@@ -421,5 +494,6 @@ class VideoProcessor:
             "speed": round(maximum_speed, 1),
             "status": status,
             "delivery_analysis": last_delivery_analysis,
-            "deliveries": deliveries_analyzed
+            "deliveries": deliveries_analyzed,
+            "summary": summary
         }

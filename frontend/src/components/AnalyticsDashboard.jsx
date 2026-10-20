@@ -5,6 +5,7 @@ import PitchMap from './PitchMap';
 export default function AnalyticsDashboard() {
   const [data, setData] = useState(null);
   const [bowlerData, setBowlerData] = useState(null);
+  const [selectedBowler, setSelectedBowler] = useState('ALL');
   const [loadingBowler, setLoadingBowler] = useState(false);
 
   useEffect(() => {
@@ -13,16 +14,25 @@ export default function AnalyticsDashboard() {
       .then((d) => setData(d))
       .catch((err) => console.error(err));
 
-    fetchBowlerAnalysis();
+    fetchBowlerAnalysis('ALL');
   }, []);
 
-  const fetchBowlerAnalysis = () => {
+  const fetchBowlerAnalysis = (bowler = selectedBowler) => {
     setLoadingBowler(true);
-    fetch('/api/bowler/analysis')
+    const url = bowler && bowler !== 'ALL'
+      ? `/api/bowler/analysis?bowler=${encodeURIComponent(bowler)}`
+      : '/api/bowler/analysis';
+
+    fetch(url)
       .then((res) => res.json())
       .then((d) => setBowlerData(d))
       .catch((err) => console.error(err))
       .finally(() => setLoadingBowler(false));
+  };
+
+  const handleBowlerChange = (bowler) => {
+    setSelectedBowler(bowler);
+    fetchBowlerAnalysis(bowler);
   };
 
   if (!data) {
@@ -71,7 +81,7 @@ export default function AnalyticsDashboard() {
       {/* Bowler Analysis Panel */}
       {bowlerData && (
         <div className="glass-card" style={{ padding: '24px', marginBottom: '28px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <Compass size={24} color="#00f2fe" />
               <div>
@@ -83,30 +93,56 @@ export default function AnalyticsDashboard() {
                 </span>
               </div>
             </div>
-            <button
-              onClick={fetchBowlerAnalysis}
-              className="btn-action"
-              style={{ padding: '6px', borderRadius: '8px' }}
-              title="Refresh Bowler Analysis"
-            >
-              <RefreshCw size={14} className={loadingBowler ? 'spin' : ''} />
-            </button>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {/* Bowler Selector */}
+              {bowlerData.bowlers && Object.keys(bowlerData.bowlers).length > 0 && (
+                <select
+                  value={selectedBowler}
+                  onChange={(e) => handleBowlerChange(e.target.value)}
+                  className="input-premium"
+                  style={{ padding: '6px 10px', fontSize: '12px', borderRadius: '8px' }}
+                >
+                  <option value="ALL">All Bowlers</option>
+                  {Object.keys(bowlerData.bowlers).map((b) => (
+                    <option key={b} value={b}>{b}</option>
+                  ))}
+                </select>
+              )}
+
+              <button
+                onClick={() => fetchBowlerAnalysis()}
+                className="btn-action"
+                style={{ padding: '6px', borderRadius: '8px' }}
+                title="Refresh Bowler Analysis"
+              >
+                <RefreshCw size={14} className={loadingBowler ? 'spin' : ''} />
+              </button>
+            </div>
           </div>
 
           {/* Quick Metrics */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '14px', marginBottom: '24px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '14px', marginBottom: '24px' }}>
+            <div style={{ background: 'rgba(5, 8, 17, 0.6)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+              <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' }}>Avg Speed</span>
+              <div style={{ fontSize: '24px', fontWeight: '900', color: '#00f2fe', marginTop: '4px' }}>
+                {bowlerData.avg_speed_kmh != null ? bowlerData.avg_speed_kmh.toFixed(1) : '0.0'} <span style={{ fontSize: '12px', color: '#64748b' }}>km/h</span>
+              </div>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>Release velocity</span>
+            </div>
+
             <div style={{ background: 'rgba(5, 8, 17, 0.6)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
               <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' }}>Avg Turn Angle</span>
               <div style={{ fontSize: '24px', fontWeight: '900', color: '#ffab00', marginTop: '4px' }}>
-                {bowlerData.avg_turn_deg.toFixed(1)}°
+                {bowlerData.avg_turn_deg != null ? bowlerData.avg_turn_deg.toFixed(1) : '0.0'}°
               </div>
               <span style={{ fontSize: '11px', color: '#64748b' }}>Pitch deflection</span>
             </div>
 
             <div style={{ background: 'rgba(5, 8, 17, 0.6)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
               <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' }}>Avg Air Swing</span>
-              <div style={{ fontSize: '24px', fontWeight: '900', color: '#00f2fe', marginTop: '4px' }}>
-                {bowlerData.avg_swing_cm.toFixed(1)} cm
+              <div style={{ fontSize: '24px', fontWeight: '900', color: '#00e676', marginTop: '4px' }}>
+                {bowlerData.avg_swing_cm != null ? bowlerData.avg_swing_cm.toFixed(1) : '0.0'} cm
               </div>
               <span style={{ fontSize: '11px', color: '#64748b' }}>Lateral air drift</span>
             </div>
@@ -114,15 +150,15 @@ export default function AnalyticsDashboard() {
             <div style={{ background: 'rgba(5, 8, 17, 0.6)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
               <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' }}>Spin Deliveries</span>
               <div style={{ fontSize: '24px', fontWeight: '900', color: '#ffab00', marginTop: '4px' }}>
-                {bowlerData.spin_count}
+                {bowlerData.spin_count ?? 0}
               </div>
-              <span style={{ fontSize: '11px', color: '#64748b' }}>Off / Leg Spin balls</span>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>Off / Leg Spin</span>
             </div>
 
             <div style={{ background: 'rgba(5, 8, 17, 0.6)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
               <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' }}>Swing Deliveries</span>
               <div style={{ fontSize: '24px', fontWeight: '900', color: '#00e676', marginTop: '4px' }}>
-                {bowlerData.swing_count}
+                {bowlerData.swing_count ?? 0}
               </div>
               <span style={{ fontSize: '11px', color: '#64748b' }}>Inswing / Outswing</span>
             </div>

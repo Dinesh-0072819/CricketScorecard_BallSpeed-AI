@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Trophy, Calendar, Eye, Users, ChevronRight, Zap, Target, Activity, FileText, X, Trash2 } from 'lucide-react';
+import { Trophy, Calendar, Eye, Users, ChevronRight, Zap, Target, Activity, FileText, X, Trash2, Clock } from 'lucide-react';
+import PitchMap from './PitchMap';
+import DeliveryTypeBadge from './DeliveryTypeBadge';
 
 export default function MatchSummaryView() {
   const [matches, setMatches] = useState([]);
@@ -461,6 +463,91 @@ export default function MatchSummaryView() {
                   </tbody>
                 </table>
               </div>
+            </div>
+
+            {/* Ball-by-Ball Trajectory & Movement Analysis Table */}
+            <div className="glass-panel" style={{ padding: '24px', marginTop: '24px' }}>
+              <h3 style={{ fontSize: '20px', fontWeight: '900', color: '#00f2fe', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Clock size={22} /> Ball-by-Ball Delivery Log & Movement Analytics
+              </h3>
+
+              {currentInnData.balls.length === 0 ? (
+                <p style={{ color: '#94a3b8', fontSize: '14px', margin: 0, textAlign: 'center', padding: '16px' }}>
+                  No ball-by-ball delivery records logged for this innings.
+                </p>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '700px', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '2px solid rgba(255,255,255,0.15)', textAlign: 'left', color: '#00f2fe', fontSize: '13px' }}>
+                        <th style={{ padding: '10px 8px' }}>Over</th>
+                        <th style={{ padding: '10px 8px' }}>Bowler</th>
+                        <th style={{ padding: '10px 8px' }}>Batter</th>
+                        <th style={{ padding: '10px 8px' }}>Runs</th>
+                        <th style={{ padding: '10px 8px' }}>Speed</th>
+                        <th style={{ padding: '10px 8px' }}>Delivery Type</th>
+                        <th style={{ padding: '10px 8px' }}>Turn Off Pitch</th>
+                        <th style={{ padding: '10px 8px' }}>Air Swing</th>
+                        <th style={{ padding: '10px 8px' }}>Length & Line</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentInnData.balls.map((bl, bIdx) => {
+                        const overBall = `${bl.over_no}.${bl.ball_no}`;
+                        const isWicket = Boolean(bl.wicket);
+                        const hasAnalysis = Boolean(bl.delivery_type);
+
+                        return (
+                          <tr
+                            key={bl.id || bIdx}
+                            style={{
+                              borderBottom: '1px solid rgba(255,255,255,0.06)',
+                              background: isWicket ? 'rgba(255, 23, 68, 0.08)' : 'transparent'
+                            }}
+                          >
+                            <td style={{ padding: '10px 8px', fontFamily: 'var(--font-mono)', fontWeight: '800', color: '#f1f5f9' }}>
+                              {overBall}
+                            </td>
+                            <td style={{ padding: '10px 8px', color: '#cbd5e1', fontWeight: '700' }}>
+                              {bl.bowler}
+                            </td>
+                            <td style={{ padding: '10px 8px', color: '#cbd5e1' }}>
+                              {bl.batsman}
+                            </td>
+                            <td style={{ padding: '10px 8px', fontFamily: 'var(--font-mono)', fontWeight: '800', color: isWicket ? '#ff1744' : '#00e676' }}>
+                              {isWicket ? 'W' : (bl.extra_type ? `${bl.runs} (${bl.extra_type})` : bl.runs)}
+                            </td>
+                            <td style={{ padding: '10px 8px', color: '#00f2fe', fontFamily: 'var(--font-mono)', fontWeight: '800' }}>
+                              {bl.speed_kmh ? `${Number(bl.speed_kmh).toFixed(1)} km/h` : '--'}
+                            </td>
+                            <td style={{ padding: '10px 8px' }}>
+                              {hasAnalysis ? (
+                                <DeliveryTypeBadge type={bl.delivery_type} size="sm" />
+                              ) : (
+                                <span style={{ color: '#64748b' }}>--</span>
+                              )}
+                            </td>
+                            <td style={{ padding: '10px 8px', color: '#ffab00', fontWeight: '700' }}>
+                              {bl.turn_angle_deg != null && bl.turn_angle_deg > 0 ? `${Number(bl.turn_angle_deg).toFixed(1)}°` : '--'}
+                            </td>
+                            <td style={{ padding: '10px 8px', color: '#00e676', fontWeight: '700' }}>
+                              {bl.swing_cm != null && bl.swing_cm > 0 ? `${Number(bl.swing_cm).toFixed(1)} cm` : '--'}
+                            </td>
+                            <td style={{ padding: '10px 8px', color: '#94a3b8' }}>
+                              {bl.length ? `${bl.length}${bl.line ? ` (${bl.line})` : ''}` : '--'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Pitch Map for the Match */}
+            <div style={{ marginTop: '24px' }}>
+              <PitchMap matchId={selectedMatch.id} />
             </div>
 
           </div>

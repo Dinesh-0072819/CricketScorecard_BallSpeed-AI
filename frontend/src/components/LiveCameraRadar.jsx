@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, Save, AlertTriangle, ShieldCheck, Zap, Gauge, Radio, Crosshair, Volume2, VolumeX, Smartphone, Camera, Target, User } from 'lucide-react';
+import { Play, Square, Save, AlertTriangle, ShieldCheck, Zap, Gauge, Radio, Crosshair, Volume2, VolumeX, Smartphone, Camera, Target, User, Clock } from 'lucide-react';
 import DeliveryAnalysisCard from './DeliveryAnalysisCard';
 import PitchMap from './PitchMap';
+import BatsmanHandToggle from './BatsmanHandToggle';
+import DeliveryTypeBadge from './DeliveryTypeBadge';
 
 export default function LiveCameraRadar({ activeMatch, onSyncDelivery }) {
   const [cameraSource, setCameraSource] = useState('mobile'); // 'mobile' (phone camera) or 'server' (PC webcam)
@@ -11,6 +13,7 @@ export default function LiveCameraRadar({ activeMatch, onSyncDelivery }) {
   const [isMuted, setIsMuted] = useState(false);
   const [batsmanHand, setBatsmanHand] = useState('RIGHT');
   const [deliveryAnalysis, setDeliveryAnalysis] = useState(null);
+  const [deliveriesHistory, setDeliveriesHistory] = useState([]);
   const [showPitchMap, setShowPitchMap] = useState(false);
 
   const videoRef = useRef(null);
@@ -112,6 +115,19 @@ export default function LiveCameraRadar({ activeMatch, onSyncDelivery }) {
                   });
                   if (data.delivery_analysis) {
                     setDeliveryAnalysis(data.delivery_analysis);
+                    setDeliveriesHistory(prev => {
+                      const last = prev[prev.length - 1];
+                      if (last && JSON.stringify(last.analysis) === JSON.stringify(data.delivery_analysis)) {
+                        return prev;
+                      }
+                      const newEntry = {
+                        id: Date.now(),
+                        index: prev.length + 1,
+                        speed_kmh: data.max_speed || data.current_speed,
+                        analysis: data.delivery_analysis
+                      };
+                      return [...prev.slice(-5), newEntry];
+                    });
                   }
                   if (processedImgRef.current && data.image) {
                     processedImgRef.current.src = data.image;
@@ -238,6 +254,19 @@ export default function LiveCameraRadar({ activeMatch, onSyncDelivery }) {
         });
         if (data.delivery_analysis) {
           setDeliveryAnalysis(data.delivery_analysis);
+          setDeliveriesHistory(prev => {
+            const last = prev[prev.length - 1];
+            if (last && JSON.stringify(last.analysis) === JSON.stringify(data.delivery_analysis)) {
+              return prev;
+            }
+            const newEntry = {
+              id: Date.now(),
+              index: prev.length + 1,
+              speed_kmh: speed,
+              analysis: data.delivery_analysis
+            };
+            return [...prev.slice(-5), newEntry];
+          });
         }
         if (data.ball_status === 'NO-BALL') {
           playNoBallAudio();
@@ -330,49 +359,12 @@ export default function LiveCameraRadar({ activeMatch, onSyncDelivery }) {
 
             {/* Controls Bar: Handedness Toggle + Pitch Map + Camera Mode */}
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              {/* Batsman Hand Toggle (RHB / LHB) */}
-              <div style={{
-                display: 'flex',
-                background: 'rgba(5, 8, 17, 0.7)',
-                padding: '2px',
-                borderRadius: '8px',
-                border: '1px solid rgba(255, 255, 255, 0.12)'
-              }}>
-                <button
-                  type="button"
-                  onClick={() => setBatsmanHand('RIGHT')}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: '11px',
-                    fontWeight: '800',
-                    border: 'none',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    background: batsmanHand === 'RIGHT' ? 'rgba(0, 242, 254, 0.25)' : 'transparent',
-                    color: batsmanHand === 'RIGHT' ? '#00f2fe' : '#94a3b8'
-                  }}
-                  title="Right-Handed Batsman"
-                >
-                  RHB
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBatsmanHand('LEFT')}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: '11px',
-                    fontWeight: '800',
-                    border: 'none',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    background: batsmanHand === 'LEFT' ? 'rgba(0, 242, 254, 0.25)' : 'transparent',
-                    color: batsmanHand === 'LEFT' ? '#00f2fe' : '#94a3b8'
-                  }}
-                  title="Left-Handed Batsman"
-                >
-                  LHB
-                </button>
-              </div>
+              {/* Batsman Hand Toggle (RHB / LHB) with localStorage persistence */}
+              <BatsmanHandToggle
+                value={batsmanHand}
+                onChange={setBatsmanHand}
+                compact
+              />
 
               {/* Pitch Map Toggle */}
               <button
@@ -416,6 +408,64 @@ export default function LiveCameraRadar({ activeMatch, onSyncDelivery }) {
               </button>
             </div>
           </div>
+
+          {/* Last 6 Deliveries Strip */}
+          {deliveriesHistory.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                overflowX: 'auto',
+                padding: '8px 12px',
+                background: 'rgba(5, 8, 17, 0.75)',
+                borderRadius: '12px',
+                border: '1px solid rgba(0, 242, 254, 0.15)',
+                marginBottom: '14px',
+                WebkitOverflowScrolling: 'touch'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', fontWeight: '800', whiteSpace: 'nowrap' }}>
+                <Clock size={13} color="#00f2fe" />
+                <span>LAST {deliveriesHistory.length}:</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'nowrap' }}>
+                {deliveriesHistory.map((d) => {
+                  const isSelected = deliveryAnalysis === d.analysis;
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => setDeliveryAnalysis(d.analysis)}
+                      style={{
+                        background: isSelected ? 'rgba(0, 242, 254, 0.2)' : 'rgba(13, 20, 36, 0.85)',
+                        border: isSelected ? '1px solid #00f2fe' : '1px solid rgba(255, 255, 255, 0.12)',
+                        borderRadius: '16px',
+                        padding: '4px 10px',
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '11px',
+                        color: '#f1f5f9',
+                        whiteSpace: 'nowrap',
+                        boxShadow: isSelected ? '0 0 10px rgba(0, 242, 254, 0.3)' : 'none',
+                        transition: 'all 0.2s ease'
+                      }}
+                      title="Tap to view delivery analysis"
+                    >
+                      <DeliveryTypeBadge type={d.analysis.delivery_type} size="sm" />
+                      {d.speed_kmh != null && (
+                        <span style={{ fontWeight: '800', color: '#00f2fe' }}>
+                          {Number(d.speed_kmh).toFixed(0)} km/h
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Video Screen Container */}
           <div className="mobile-video-height" style={{

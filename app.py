@@ -307,11 +307,23 @@ def camera_stats():
 
 
 # ----------------------------------
-# Upload Video
+# Upload Progress & Video Processing
 # ----------------------------------
+
+upload_status = {
+    "percent": 0,
+    "status": "idle",
+    "message": ""
+}
+
+@app.route("/api/upload/status", methods=["GET"])
+def get_upload_status():
+    return jsonify(upload_status)
 
 @app.route("/upload", methods=["POST"])
 def upload_video():
+    global upload_status
+    upload_status = {"percent": 5, "status": "processing", "message": "Saving video..."}
     try:
         # Clear previous uploads to save space
         if os.path.exists(app.config["UPLOAD_FOLDER"]):
@@ -324,11 +336,13 @@ def upload_video():
                     print(f"Error deleting file {file_path}: {e}")
 
         if "video" not in request.files:
+            upload_status = {"percent": 0, "status": "error", "message": "No Video Selected"}
             return jsonify({"status": "error", "message": "No Video Selected"}), 400
 
         file = request.files["video"]
 
         if file.filename == "":
+            upload_status = {"percent": 0, "status": "error", "message": "No Video Selected"}
             return jsonify({"status": "error", "message": "No Video Selected"}), 400
 
         max_speed = float(
@@ -349,6 +363,7 @@ def upload_video():
         file.save(input_path)
 
         print(f"Video Saved : {input_path}")
+        upload_status = {"percent": 15, "status": "processing", "message": "Detecting ball & movement..."}
 
         batsman_hand = request.form.get("batsman_hand", "RIGHT").upper().strip()
         if batsman_hand not in ("RIGHT", "LEFT"):
@@ -356,12 +371,18 @@ def upload_video():
 
         calibration_profile = request.form.get("calibration_profile", "default")
 
+        def progress_cb(pct):
+            global upload_status
+            upload_status["percent"] = min(95, max(15, int(pct)))
+            upload_status["message"] = f"Processing frames: {upload_status['percent']}%"
+
         result = video_processor.process(
             input_video=input_path,
             output_video=output_path,
             max_speed=max_speed,
             batsman_hand=batsman_hand,
-            calibration_profile=calibration_profile
+            calibration_profile=calibration_profile,
+            progress_callback=progress_cb
         )
 
         # Store latest delivery analysis in memory for scorecard auto-linking
@@ -378,17 +399,22 @@ def upload_video():
         )
 
         print("Video Processed Successfully")
+        upload_status = {"percent": 100, "status": "completed", "message": "Processing complete!"}
 
         return jsonify({
             "status": "success",
             "video_url": f"/uploads/{output_filename}",
+            "processed_video_url": f"/uploads/{output_filename}",
             "detected_speed": float(result["speed"]),
             "max_speed": max_speed,
             "ball_status": result["status"],
-            "delivery_analysis": delivery_analysis
+            "delivery_analysis": delivery_analysis,
+            "deliveries": result.get("deliveries", []),
+            "summary": result.get("summary", {})
         })
     except Exception as e:
         print(f"Video processing error: {e}")
+        upload_status = {"percent": 0, "status": "error", "message": str(e)}
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ----------------------------------

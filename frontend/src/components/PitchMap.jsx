@@ -1,18 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { Target, Info, Filter, RefreshCw } from 'lucide-react';
+import { DELIVERY_COLORS, getDeliveryColor } from './DeliveryTypeBadge';
 
-const DELIVERY_COLORS = {
-  OFF_SPIN: '#ffab00',
-  LEG_SPIN: '#ff1744',
-  INSWING: '#00f2fe',
-  OUTSWING: '#00e676',
-  STRAIGHT: '#ffffff'
-};
-
-export default function PitchMap({ matchId = null, deliveries: propDeliveries = null }) {
+export default function PitchMap({
+  deliveries: propDeliveries = null,
+  highlightedIndex = null,
+  onSelectDelivery = null,
+  matchId = null,
+  compact = false
+}) {
   const [deliveries, setDeliveries] = useState(propDeliveries || []);
   const [selectedBall, setSelectedBall] = useState(null);
-  const [filterBowler, setFilterBowler] = useState('ALL');
   const [filterType, setFilterType] = useState('ALL');
   const [loading, setLoading] = useState(false);
 
@@ -21,7 +19,9 @@ export default function PitchMap({ matchId = null, deliveries: propDeliveries = 
       setDeliveries(propDeliveries);
       return;
     }
-    fetchDeliveries();
+    if (matchId) {
+      fetchDeliveries();
+    }
   }, [matchId, propDeliveries]);
 
   const fetchDeliveries = async () => {
@@ -40,27 +40,50 @@ export default function PitchMap({ matchId = null, deliveries: propDeliveries = 
     }
   };
 
-  // Unique bowlers for filter
-  const bowlers = ['ALL', ...Array.from(new Set(deliveries.map(d => d.bowler).filter(Boolean)))];
+  // Helper to extract bounce coordinates from heterogeneous data structures
+  const getCoords = (d) => {
+    if (d.bounce_x != null && d.bounce_y != null) {
+      return [Number(d.bounce_x), Number(d.bounce_y)];
+    }
+    if (d.bounce_xy_m && Array.isArray(d.bounce_xy_m)) {
+      return [Number(d.bounce_xy_m[0]), Number(d.bounce_xy_m[1])];
+    }
+    if (d.analysis && d.analysis.bounce_xy_m && Array.isArray(d.analysis.bounce_xy_m)) {
+      return [Number(d.analysis.bounce_xy_m[0]), Number(d.analysis.bounce_xy_m[1])];
+    }
+    return null;
+  };
 
-  // Filter deliveries with valid bounce points
-  const validBalls = deliveries.filter(d => {
-    if (d.bounce_x == null || d.bounce_y == null) return false;
-    if (filterBowler !== 'ALL' && d.bowler !== filterBowler) return false;
-    if (filterType !== 'ALL' && (d.delivery_type || 'STRAIGHT') !== filterType) return false;
+  const getDelivType = (d) => {
+    if (d.delivery_type) return d.delivery_type;
+    if (d.analysis && d.analysis.delivery_type) return d.analysis.delivery_type;
+    return 'STRAIGHT';
+  };
+
+  const validBalls = (deliveries || []).map((d, idx) => {
+    const coords = getCoords(d);
+    if (!coords) return null;
+    return {
+      ...d,
+      _idx: d.index != null ? d.index : idx + 1,
+      _rawIdx: idx,
+      _bx: coords[0],
+      _by: coords[1],
+      _type: getDelivType(d)
+    };
+  }).filter(Boolean).filter(d => {
+    if (filterType !== 'ALL' && d._type !== filterType) return false;
     return true;
   });
 
-  // SVG dimensions
-  const svgWidth = 260;
-  const svgHeight = 560;
-  const pitchLeft = 40;
-  const pitchRight = 220;
-  const pitchTop = 40;     // Bowler end (y=0)
-  const pitchBottom = 520; // Batsman stumps (y=20.12)
+  // SVG dimensions (22 yards = 20.12m pitch length, 3.05m width)
+  const svgWidth = 280;
+  const svgHeight = 580;
+  const pitchLeft = 50;
+  const pitchRight = 230;
+  const pitchTop = 50;      // Bowler end (y=0)
+  const pitchBottom = 530;  // Batsman stumps (y=20.12)
 
-  // Coordinate mapping
-  // Real world: x in [-1.525, +1.525], y in [0, 20.12]
   const mapX = (x) => {
     const clamped = Math.max(-1.525, Math.min(1.525, Number(x) || 0));
     const norm = (clamped + 1.525) / 3.05;
@@ -73,232 +96,287 @@ export default function PitchMap({ matchId = null, deliveries: propDeliveries = 
     return pitchTop + norm * (pitchBottom - pitchTop);
   };
 
-  // Length zones coordinates (from batsman end y=20.12m)
-  // Short: y < 13.12m (dist > 7m)
-  // Good: 13.12m <= y < 16.12m (dist 4-7m)
-  // Full: 16.12m <= y < 18.12m (dist 2-4m)
-  // Yorker: 18.12m <= y < 20.12m (dist < 2m)
+  // Length zones from batsman crease (y=18.9m)
   const yShort = mapY(13.12);
   const yGood = mapY(16.12);
   const yFull = mapY(18.12);
-  const yBatPopping = mapY(18.89);
+  const yBatsmanCrease = mapY(18.90);
+  const yBowlerCrease = mapY(1.22);
+
+  const handleBallClick = (ball) => {
+    setSelectedBall(ball);
+    if (onSelectDelivery) {
+      onSelectDelivery(ball, ball._rawIdx);
+    }
+  };
 
   return (
     <div
       className="glass-panel"
       style={{
-        background: 'rgba(13, 20, 36, 0.85)',
+        background: 'rgba(13, 20, 36, 0.90)',
         border: '1px solid rgba(0, 242, 254, 0.2)',
         borderRadius: '16px',
-        padding: '24px',
-        color: '#f1f5f9'
+        padding: compact ? '14px' : '20px',
+        color: '#f1f5f9',
+        width: '100%',
+        boxSizing: 'border-box'
       }}
     >
-      {/* Title & Controls */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <Target size={24} color="#00f2fe" />
-          <div>
-            <h3 style={{ fontSize: '16px', fontWeight: '900', margin: 0 }}>Pitch Bounce Map</h3>
-            <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-              {validBalls.length} ball{validBalls.length === 1 ? '' : 's'} plotted (top-down pitch view)
-            </span>
-          </div>
+      {/* Header & Controls */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Target size={compact ? 18 : 22} color="#00f2fe" />
+          <h3 style={{ margin: 0, fontSize: compact ? '14px' : '16px', fontWeight: '800', letterSpacing: '0.5px' }}>
+            Pitch Map <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '500' }}>({validBalls.length} balls)</span>
+          </h3>
         </div>
 
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          {/* Bowler Filter */}
-          {bowlers.length > 2 && (
-            <select
-              value={filterBowler}
-              onChange={(e) => setFilterBowler(e.target.value)}
-              style={{
-                background: 'rgba(5, 8, 17, 0.8)',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                color: '#fff',
-                fontSize: '11px',
-                borderRadius: '8px',
-                padding: '4px 8px'
-              }}
-            >
-              {bowlers.map(b => (
-                <option key={b} value={b}>{b === 'ALL' ? 'All Bowlers' : b}</option>
-              ))}
-            </select>
-          )}
-
-          <button
-            onClick={fetchDeliveries}
-            className="btn-action"
-            style={{ padding: '6px', borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.1)' }}
-            title="Refresh Pitch Deliveries"
-          >
-            <RefreshCw size={14} className={loading ? 'spin' : ''} />
-          </button>
-        </div>
+        {/* Filter Dropdown */}
+        <select
+          value={filterType}
+          onChange={(e) => setFilterType(e.target.value)}
+          style={{
+            background: 'rgba(5, 8, 17, 0.8)',
+            border: '1px solid rgba(0, 242, 254, 0.3)',
+            borderRadius: '8px',
+            color: '#f1f5f9',
+            padding: '4px 8px',
+            fontSize: '11px',
+            fontWeight: '700',
+            cursor: 'pointer',
+            outline: 'none'
+          }}
+        >
+          <option value="ALL">All Deliveries</option>
+          <option value="OFF_SPIN">Off Spin</option>
+          <option value="LEG_SPIN">Leg Spin</option>
+          <option value="INSWING">Inswing</option>
+          <option value="OUTSWING">Outswing</option>
+          <option value="STRAIGHT">Straight</option>
+        </select>
       </div>
 
-      {/* SVG Canvas & Details Container */}
-      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', justifyContent: 'center' }}>
-        {/* SVG Graphic */}
-        <div style={{ maxWidth: '280px', width: '100%', position: 'relative' }}>
-          <svg
-            viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-            style={{
-              width: '100%',
-              height: 'auto',
-              background: '#09111e',
-              borderRadius: '12px',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              boxShadow: 'inset 0 0 40px rgba(0, 0, 0, 0.8)'
-            }}
-          >
-            {/* Pitch Turf Surface */}
-            <rect
-              x={pitchLeft}
-              y={pitchTop}
-              width={pitchRight - pitchLeft}
-              height={pitchBottom - pitchTop}
-              fill="#18271e"
-              stroke="#2e4c3a"
-              strokeWidth="2"
-            />
+      {/* SVG Container */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          background: 'rgba(5, 8, 17, 0.6)',
+          borderRadius: '12px',
+          padding: '12px 6px',
+          border: '1px solid rgba(255, 255, 255, 0.05)',
+          position: 'relative'
+        }}
+      >
+        <svg
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          style={{
+            width: '100%',
+            maxWidth: compact ? '240px' : '300px',
+            height: 'auto',
+            display: 'block'
+          }}
+        >
+          <defs>
+            <linearGradient id="pitchGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#1e293b" stopOpacity="0.8" />
+              <stop offset="100%" stopColor="#0f172a" stopOpacity="0.9" />
+            </linearGradient>
+            <filter id="glowEffect" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="3" result="blur" />
+              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            </filter>
+          </defs>
 
-            {/* Length Zones Bands & Labels */}
-            {/* Short Zone */}
-            <rect
-              x={pitchLeft}
-              y={pitchTop}
-              width={pitchRight - pitchLeft}
-              height={yShort - pitchTop}
-              fill="rgba(255, 23, 68, 0.05)"
-            />
-            <line x1={pitchLeft} y1={yShort} x2={pitchRight} y2={yShort} stroke="rgba(255, 255, 255, 0.2)" strokeDasharray="4 4" />
-            <text x={pitchLeft + 6} y={yShort - 6} fill="#94a3b8" fontSize="9" fontWeight="600">SHORT</text>
+          {/* Outer Pitch Turf */}
+          <rect
+            x={pitchLeft}
+            y={pitchTop}
+            width={pitchRight - pitchLeft}
+            height={pitchBottom - pitchTop}
+            fill="url(#pitchGrad)"
+            stroke="rgba(0, 242, 254, 0.3)"
+            strokeWidth="2"
+            rx="6"
+          />
 
-            {/* Good Length Zone */}
-            <rect
-              x={pitchLeft}
-              y={yShort}
-              width={pitchRight - pitchLeft}
-              height={yGood - yShort}
-              fill="rgba(0, 230, 118, 0.08)"
-            />
-            <line x1={pitchLeft} y1={yGood} x2={pitchRight} y2={yGood} stroke="rgba(255, 255, 255, 0.2)" strokeDasharray="4 4" />
-            <text x={pitchLeft + 6} y={yGood - 6} fill="#00e676" fontSize="9" fontWeight="700">GOOD LENGTH</text>
+          {/* Length Zone Bands */}
+          {/* Yorker Zone */}
+          <rect
+            x={pitchLeft}
+            y={yFull}
+            width={pitchRight - pitchLeft}
+            height={pitchBottom - yFull}
+            fill="rgba(255, 23, 68, 0.06)"
+          />
+          {/* Full Zone */}
+          <rect
+            x={pitchLeft}
+            y={yGood}
+            width={pitchRight - pitchLeft}
+            height={yFull - yGood}
+            fill="rgba(0, 242, 254, 0.05)"
+          />
+          {/* Good Length Zone */}
+          <rect
+            x={pitchLeft}
+            y={yShort}
+            width={pitchRight - pitchLeft}
+            height={yGood - yShort}
+            fill="rgba(0, 230, 118, 0.08)"
+          />
 
-            {/* Full Zone */}
-            <rect
-              x={pitchLeft}
-              y={yGood}
-              width={pitchRight - pitchLeft}
-              height={yFull - yGood}
-              fill="rgba(0, 242, 254, 0.08)"
-            />
-            <line x1={pitchLeft} y1={yFull} x2={pitchRight} y2={yFull} stroke="rgba(255, 255, 255, 0.2)" strokeDasharray="4 4" />
-            <text x={pitchLeft + 6} y={yFull - 6} fill="#00f2fe" fontSize="9" fontWeight="700">FULL</text>
+          {/* Zone Divider Dashed Lines */}
+          <line x1={pitchLeft} y1={yShort} x2={pitchRight} y2={yShort} stroke="rgba(255,255,255,0.15)" strokeDasharray="3,3" />
+          <line x1={pitchLeft} y1={yGood} x2={pitchRight} y2={yGood} stroke="rgba(255,255,255,0.15)" strokeDasharray="3,3" />
+          <line x1={pitchLeft} y1={yFull} x2={pitchRight} y2={yFull} stroke="rgba(255,255,255,0.15)" strokeDasharray="3,3" />
 
-            {/* Yorker Zone */}
-            <rect
-              x={pitchLeft}
-              y={yFull}
-              width={pitchRight - pitchLeft}
-              height={pitchBottom - yFull}
-              fill="rgba(255, 171, 0, 0.08)"
-            />
-            <text x={pitchLeft + 6} y={pitchBottom - 6} fill="#ffab00" fontSize="9" fontWeight="700">YORKER</text>
+          {/* Zone Labels */}
+          <text x={pitchLeft + 8} y={yShort - 6} fill="#64748b" fontSize="9" fontWeight="700">SHORT</text>
+          <text x={pitchLeft + 8} y={yGood - 6} fill="#00e676" fontSize="9" fontWeight="700">GOOD LENGTH</text>
+          <text x={pitchLeft + 8} y={yFull - 6} fill="#00f2fe" fontSize="9" fontWeight="700">FULL</text>
+          <text x={pitchLeft + 8} y={pitchBottom - 6} fill="#ff1744" fontSize="9" fontWeight="700">YORKER</text>
 
-            {/* Creases */}
-            {/* Bowler crease at pitchTop */}
-            <line x1={pitchLeft - 10} y1={pitchTop} x2={pitchRight + 10} y2={pitchTop} stroke="#ffffff" strokeWidth="2" />
-            {/* Batsman popping crease */}
-            <line x1={pitchLeft - 12} y1={yBatPopping} x2={pitchRight + 12} y2={yBatPopping} stroke="#ffffff" strokeWidth="2" />
-            {/* Batsman bowling/stumps crease */}
-            <line x1={pitchLeft - 10} y1={pitchBottom} x2={pitchRight + 10} y2={pitchBottom} stroke="#ffffff" strokeWidth="2" />
+          {/* Bowler End Creases & Stumps */}
+          <line x1={pitchLeft - 10} y1={yBowlerCrease} x2={pitchRight + 10} y2={yBowlerCrease} stroke="rgba(255,255,255,0.4)" strokeWidth="1.5" />
+          <line x1={pitchLeft + 30} y1={pitchTop} x2={pitchRight - 30} y2={pitchTop} stroke="#ffab00" strokeWidth="3" />
+          <text x={140} y={pitchTop - 12} fill="#94a3b8" fontSize="10" fontWeight="700" textAnchor="middle">BOWLER END (0m)</text>
 
-            {/* Stumps (Bowler End) */}
-            <circle cx={130} cy={pitchTop} r={3} fill="#ffffff" />
-            <circle cx={124} cy={pitchTop} r={3} fill="#ffffff" />
-            <circle cx={136} cy={pitchTop} r={3} fill="#ffffff" />
+          {/* Batsman End Creases & Stumps */}
+          <line x1={pitchLeft - 10} y1={yBatsmanCrease} x2={pitchRight + 10} y2={yBatsmanCrease} stroke="#00f2fe" strokeWidth="2" />
+          <line x1={pitchLeft + 30} y1={pitchBottom} x2={pitchRight - 30} y2={pitchBottom} stroke="#ffab00" strokeWidth="3" />
+          <text x={140} y={pitchBottom + 22} fill="#00f2fe" fontSize="10" fontWeight="800" textAnchor="middle">BATSMAN END (20.12m)</text>
 
-            {/* Stumps (Batsman End) */}
-            <circle cx={130} cy={pitchBottom} r={3} fill="#ffffff" />
-            <circle cx={124} cy={pitchBottom} r={3} fill="#ffffff" />
-            <circle cx={136} cy={pitchBottom} r={3} fill="#ffffff" />
+          {/* Middle Stumps Alignment Guideline */}
+          <line x1={140} y1={pitchTop} x2={140} y2={pitchBottom} stroke="rgba(0, 242, 254, 0.15)" strokeDasharray="4,4" />
 
-            {/* Central Pitch Axis Guide */}
-            <line x1={130} y1={pitchTop} x2={130} y2={pitchBottom} stroke="rgba(255, 255, 255, 0.1)" strokeDasharray="2 4" />
+          {/* Bounce Points */}
+          {validBalls.map((ball) => {
+            const cx = mapX(ball._bx);
+            const cy = mapY(ball._by);
+            const colorCfg = getDeliveryColor(ball._type);
+            const isHighlighted = (highlightedIndex != null && (ball._idx === highlightedIndex || ball._rawIdx === highlightedIndex));
+            const isSelected = selectedBall && (selectedBall._idx === ball._idx);
 
-            {/* Plotted Delivery Bounce Points */}
-            {validBalls.map((b, idx) => {
-              const cx = mapX(b.bounce_x);
-              const cy = mapY(b.bounce_y);
-              const color = DELIVERY_COLORS[b.delivery_type] || DELIVERY_COLORS.STRAIGHT;
-              const isSelected = selectedBall && selectedBall.id === b.id;
+            return (
+              <g
+                key={ball._idx}
+                onClick={() => handleBallClick(ball)}
+                style={{ cursor: 'pointer' }}
+              >
+                {/* Pulsing ring for highlighted/selected balls */}
+                {(isHighlighted || isSelected) && (
+                  <>
+                    <circle
+                      cx={cx}
+                      cy={cy}
+                      r="14"
+                      fill="none"
+                      stroke={colorCfg.border}
+                      strokeWidth="2"
+                      opacity="0.8"
+                      filter="url(#glowEffect)"
+                    />
+                    <circle
+                      cx={cx}
+                      cy={cy}
+                      r="9"
+                      fill="none"
+                      stroke="#ffffff"
+                      strokeWidth="1.5"
+                    />
+                  </>
+                )}
 
-              return (
-                <g key={b.id || idx} onClick={() => setSelectedBall(b)} style={{ cursor: 'pointer' }}>
-                  {isSelected && (
-                    <circle cx={cx} cy={cy} r={10} fill="none" stroke={color} strokeWidth={2} opacity={0.8} />
-                  )}
-                  <circle
-                    cx={cx}
-                    cy={cy}
-                    r={isSelected ? 6 : 4.5}
-                    fill={color}
-                    stroke="#000"
-                    strokeWidth={1}
-                  />
-                </g>
-              );
-            })}
-          </svg>
-        </div>
+                {/* Main bounce circle */}
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={isHighlighted || isSelected ? 6.5 : 5}
+                  fill={colorCfg.accent}
+                  stroke="#050811"
+                  strokeWidth="1.5"
+                />
 
-        {/* Legend & Selected Ball Details */}
-        <div style={{ flex: 1, minWidth: '220px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Legend */}
-          <div style={{ background: 'rgba(5, 8, 17, 0.6)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
-            <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '700', textTransform: 'uppercase', display: 'block', marginBottom: '8px' }}>
-              Delivery Types
+                {/* Delivery index number on ball */}
+                <text
+                  x={cx}
+                  y={cy + 3}
+                  fill="#050811"
+                  fontSize="7"
+                  fontWeight="900"
+                  textAnchor="middle"
+                >
+                  {ball._idx}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Selected Ball Tooltip/Details */}
+      {selectedBall && (
+        <div
+          style={{
+            marginTop: '10px',
+            padding: '10px 14px',
+            background: 'rgba(5, 8, 17, 0.85)',
+            border: '1px solid rgba(0, 242, 254, 0.25)',
+            borderRadius: '10px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            fontSize: '12px'
+          }}
+        >
+          <div>
+            <span style={{ color: '#00f2fe', fontWeight: '800', marginRight: '6px' }}>
+              Ball #{selectedBall._idx}:
             </span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '12px' }}>
-              {Object.entries(DELIVERY_COLORS).map(([type, color]) => (
-                <div key={type} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: color }} />
-                  <span style={{ color: '#cbd5e1' }}>{type.replace('_', ' ')}</span>
-                </div>
-              ))}
-            </div>
+            <span style={{ color: getDeliveryColor(selectedBall._type).text, fontWeight: '700' }}>
+              {selectedBall._type}
+            </span>
+            <span style={{ color: '#94a3b8', marginLeft: '8px' }}>
+              {selectedBall.length || 'Good Length'}
+            </span>
           </div>
 
-          {/* Selected Ball Inspector */}
-          {selectedBall ? (
-            <div style={{ background: 'rgba(5, 8, 17, 0.75)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(0, 242, 254, 0.25)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span style={{ fontSize: '12px', fontWeight: '900', color: DELIVERY_COLORS[selectedBall.delivery_type] || '#fff' }}>
-                  {selectedBall.delivery_type || 'STRAIGHT'}
-                </span>
-                <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-                  Over {selectedBall.over_no}.{selectedBall.ball_no}
-                </span>
-              </div>
-              <div style={{ fontSize: '12px', color: '#cbd5e1', lineHeight: '1.6' }}>
-                <div>Bowler: <strong style={{ color: '#fff' }}>{selectedBall.bowler}</strong></div>
-                <div>Speed: <strong style={{ color: '#00f2fe' }}>{selectedBall.speed_kmh ? `${selectedBall.speed_kmh} km/h` : 'N/A'}</strong></div>
-                {selectedBall.turn_angle_deg > 0 && <div>Turn: <strong style={{ color: '#ffab00' }}>{selectedBall.turn_angle_deg}°</strong></div>}
-                {selectedBall.swing_cm > 0 && <div>Swing: <strong style={{ color: '#00e676' }}>{selectedBall.swing_cm} cm</strong></div>}
-                <div>Length: <strong>{selectedBall.length || 'Good Length'}</strong></div>
-                <div>Line: <strong>{selectedBall.line || 'Middle Stump'}</strong></div>
-              </div>
-            </div>
-          ) : (
-            <div style={{ background: 'rgba(5, 8, 17, 0.4)', padding: '14px', borderRadius: '12px', border: '1px dashed rgba(255, 255, 255, 0.08)', textAlign: 'center', color: '#64748b', fontSize: '12px' }}>
-              <Info size={16} style={{ margin: '0 auto 6px auto', display: 'block' }} />
-              Click any dot on the pitch map to inspect ball trajectory & velocity.
-            </div>
-          )}
+          <div style={{ color: '#cbd5e1', fontWeight: '700' }}>
+            {selectedBall.turn_angle_deg != null && `${Number(selectedBall.turn_angle_deg).toFixed(1)}° turn`}
+            {selectedBall.speed_kmh != null && ` • ${Number(selectedBall.speed_kmh).toFixed(1)} km/h`}
+          </div>
         </div>
+      )}
+
+      {/* Legend */}
+      <div
+        style={{
+          marginTop: '12px',
+          display: 'flex',
+          justifyContent: 'center',
+          flexWrap: 'wrap',
+          gap: '12px',
+          fontSize: '11px',
+          color: '#94a3b8'
+        }}
+      >
+        {Object.entries(DELIVERY_COLORS).map(([key, cfg]) => (
+          <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: cfg.accent,
+                boxShadow: `0 0 4px ${cfg.accent}`
+              }}
+            />
+            <span style={{ color: '#cbd5e1', fontWeight: '600' }}>{cfg.label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );

@@ -276,3 +276,14 @@ select.glass-input-large option {
     height: 260px !important;
   }
 }
+
+@media (max-width: 380px) {
+  .glass-panel, .glass-card {
+    padding: 12px !important;
+    border-radius: 12px !important;
+  }
+  .btn-action {
+    padding: 10px 14px !important;
+    font-size: 12px !important;
+  }
+}
