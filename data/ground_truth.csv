@@ -1,0 +1,14 @@
+clip_path,true_label,batsman_hand,true_turn_angle,speed_kmh
+clip_offspin_rhb_01.mp4,OFF_SPIN,RIGHT,3.8,86.0
+clip_offspin_rhb_02.mp4,OFF_SPIN,RIGHT,4.5,84.0
+clip_offspin_lhb_01.mp4,OFF_SPIN,LEFT,3.2,88.0
+clip_legspin_rhb_01.mp4,LEG_SPIN,RIGHT,4.2,82.0
+clip_legspin_rhb_02.mp4,LEG_SPIN,RIGHT,5.1,80.0
+clip_legspin_lhb_01.mp4,LEG_SPIN,LEFT,3.9,85.0
+clip_inswing_rhb_01.mp4,INSWING,RIGHT,0.4,132.0
+clip_inswing_lhb_01.mp4,INSWING,LEFT,0.3,130.0
+clip_outswing_rhb_01.mp4,OUTSWING,RIGHT,0.5,134.0
+clip_outswing_lhb_01.mp4,OUTSWING,LEFT,0.4,129.0
+clip_straight_seam_01.mp4,STRAIGHT,RIGHT,0.2,128.0
+clip_straight_spin_01.mp4,STRAIGHT,RIGHT,0.6,89.0
+clip_straight_lhb_01.mp4,STRAIGHT,LEFT,0.3,131.0
