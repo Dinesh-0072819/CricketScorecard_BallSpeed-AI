@@ -89,7 +89,8 @@ class VideoProcessor:
         from ai.alarm import AlarmSystem
         from ai.track_cleaning import clean_track
         from ai.delivery_analysis import analyze_delivery
-        from config import ENABLE_BALL_ANALYSIS, LOST_FRAMES_N, MIN_TRACK_POINTS
+        from ai.overlay_hud import draw_live_trail, draw_post_delivery_hud
+        from config import ENABLE_BALL_ANALYSIS, LOST_FRAMES_N, MIN_TRACK_POINTS, OVERLAY_HOLD_SECONDS
 
         cap = cv2.VideoCapture(input_video)
 
@@ -142,6 +143,8 @@ class VideoProcessor:
         lost_frames = 0
         delivery_active = False
         last_delivery_analysis = None
+        last_delivery_points = []
+        last_delivery_frame = -999999
         deliveries_analyzed = []
 
         while True:
@@ -268,20 +271,17 @@ class VideoProcessor:
                             try:
                                 analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=maximum_speed)
                                 last_delivery_analysis = analysis
+                                last_delivery_points = list(cleaned)
+                                last_delivery_frame = frame_number
                                 deliveries_analyzed.append(analysis)
                             except Exception as err:
                                 print(f"Delivery analysis error: {err}")
                     trajectory_buffer = []
                     lost_frames = 0
 
-            # ---------------- BALL TRAIL DRAWING ----------------
+            # ---------------- BALL TRAIL DRAWING (Fading Cyan #00f2fe) ----------------
             if ball_found and len(primary_track.smoothed_history) > 1:
-                trail = primary_track.smoothed_history[-25:]
-                for i in range(1, len(trail)):
-                    thickness = max(1, int(i / 4))
-                    pt1 = (int(trail[i-1][0]), int(trail[i-1][1]))
-                    pt2 = (int(trail[i][0]), int(trail[i][1]))
-                    cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
+                draw_live_trail(annotated, primary_track.smoothed_history, current_center)
 
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
@@ -319,6 +319,20 @@ class VideoProcessor:
             detect_text = "TRACKED" if ball_found else "LOST"
             detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
             cv2.putText(annotated, detect_text, (x1 + 15, y1 + 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, detect_color, 1)
+
+            # ---------------- POST-DELIVERY HUD OVERLAY ----------------
+            if last_delivery_analysis and (frame_number - last_delivery_frame) / fps <= OVERLAY_HOLD_SECONDS:
+                try:
+                    overlay_age = (frame_number - last_delivery_frame) / fps
+                    draw_post_delivery_hud(
+                        annotated,
+                        last_delivery_analysis,
+                        overlay_age=overlay_age,
+                        speed_kmh=maximum_speed,
+                        trajectory_points=last_delivery_points
+                    )
+                except Exception as hud_err:
+                    print(f"Error drawing HUD: {hud_err}")
 
             out.write(annotated)
 

@@ -22,6 +22,7 @@ from ai.speed import SpeedEstimator, pixel_to_ground
 from ai.alarm import AlarmSystem
 from ai.track_cleaning import clean_track
 from ai.delivery_analysis import analyze_delivery
+from ai.overlay_hud import draw_live_trail, draw_post_delivery_hud
 from ai.utils import CalibrationManager
 from config import (
     ENABLE_BALL_ANALYSIS,
@@ -88,6 +89,7 @@ live_calibration_profile = "default"
 
 latest_delivery_analysis = None
 latest_delivery_timestamp = 0.0
+live_last_delivery_points = []
 
 # ----------------------------------
 # Generate Camera Frames
@@ -188,14 +190,9 @@ def generate_frames():
 
                 status, status_color = live_alarm.check(live_detected_speed)
 
-                # Draw Live Trail
+                # Draw Live Trail (Fading Cyan #00f2fe)
                 if ball_found and len(primary_track.smoothed_history) > 1:
-                    trail = primary_track.smoothed_history[-25:]
-                    for i in range(1, len(trail)):
-                        thickness = max(1, int(i / 4))
-                        pt1 = (int(trail[i-1][0]), int(trail[i-1][1]))
-                        pt2 = (int(trail[i][0]), int(trail[i][1]))
-                        cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
+                    draw_live_trail(annotated, primary_track.smoothed_history, current_center)
 
                 # Overlay HUD panel in the top-right
                 h, w, c = annotated.shape
@@ -216,6 +213,21 @@ def generate_frames():
                 detect_text = "TRACKED" if ball_found else "LOST"
                 detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
                 cv2.putText(annotated, detect_text, (x1 + 10, y1 + 125), cv2.FONT_HERSHEY_SIMPLEX, 0.45, detect_color, 2)
+
+                # Post-Delivery HUD Banner Overlay
+                if latest_delivery_analysis and latest_delivery_timestamp > 0:
+                    overlay_age = time.time() - latest_delivery_timestamp
+                    if overlay_age <= OVERLAY_HOLD_SECONDS:
+                        try:
+                            draw_post_delivery_hud(
+                                annotated,
+                                latest_delivery_analysis,
+                                overlay_age=overlay_age,
+                                speed_kmh=live_maximum_speed,
+                                trajectory_points=live_last_delivery_points
+                            )
+                        except Exception as hud_err:
+                            logger.error(f"Error in generate_frames HUD: {hud_err}")
 
             ret, buffer = cv2.imencode(".jpg", annotated)
 
@@ -572,20 +584,16 @@ def process_frame():
                         an = analyze_delivery(cleaned, batsman_hand=live_batsman_hand, speed_kmh=live_maximum_speed)
                         latest_delivery_analysis = an
                         latest_delivery_timestamp = time.time()
+                        live_last_delivery_points = list(cleaned)
                         current_delivery_analysis = an
                     except Exception as err:
                         logger.error(f"Error in live analyze_delivery: {err}")
             live_delivery_buffer = []
             live_lost_frames = 0
 
-    # Draw live trail
+    # Draw live trail (Fading Cyan #00f2fe)
     if ball_found and len(primary_track.smoothed_history) > 1:
-        trail = primary_track.smoothed_history[-25:]
-        for i in range(1, len(trail)):
-            thickness = max(1, int(i / 4))
-            pt1 = (int(trail[i-1][0]), int(trail[i-1][1]))
-            pt2 = (int(trail[i][0]), int(trail[i][1]))
-            cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
+        draw_live_trail(annotated, primary_track.smoothed_history, current_center)
 
     # Overlay HUD panel in the top-right
     box_width = 210
@@ -605,6 +613,21 @@ def process_frame():
     detect_text = "TRACKED" if ball_found else "LOST"
     detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
     cv2.putText(annotated, detect_text, (x1 + 10, y1 + 125), cv2.FONT_HERSHEY_SIMPLEX, 0.45, detect_color, 2)
+
+    # Post-Delivery HUD Banner Overlay
+    if latest_delivery_analysis and latest_delivery_timestamp > 0:
+        overlay_age = time.time() - latest_delivery_timestamp
+        if overlay_age <= OVERLAY_HOLD_SECONDS:
+            try:
+                draw_post_delivery_hud(
+                    annotated,
+                    latest_delivery_analysis,
+                    overlay_age=overlay_age,
+                    speed_kmh=live_maximum_speed,
+                    trajectory_points=live_last_delivery_points
+                )
+            except Exception as hud_err:
+                logger.error(f"Error in process_frame HUD: {hud_err}")
 
     # Encode back to base64
     ret, jpeg = cv2.imencode(".jpg", annotated)

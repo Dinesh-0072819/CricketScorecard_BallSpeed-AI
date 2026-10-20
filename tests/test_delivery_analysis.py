@@ -405,3 +405,69 @@ def test_full_innings_completion_flow():
     assert st["balls"] == 6
     assert st["status"] == "INNINGS_BREAK"
 
+
+# ---------------------------------------------------------------------------
+# 4. Phase 2 Video Overlay HUD Tests
+# ---------------------------------------------------------------------------
+
+def test_overlay_live_trail():
+    """
+    Test live fading cyan trail drawing on 720p and 1080p frames.
+    """
+    import numpy as np
+    from ai.overlay_hud import draw_live_trail
+
+    # 720p frame
+    frame_720p = np.zeros((720, 1280, 3), dtype=np.uint8)
+    history = [(float(600 + i * 2), float(200 + i * 15)) for i in range(30)]
+    draw_live_trail(frame_720p, history, current_center=(660, 650))
+    # Confirm pixels were modified (not all zero)
+    assert np.any(frame_720p > 0)
+
+    # 1080p frame
+    frame_1080p = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    draw_live_trail(frame_1080p, history, current_center=(960, 900))
+    assert np.any(frame_1080p > 0)
+
+
+def test_overlay_post_delivery_hud():
+    """
+    Test post-delivery HUD drawing:
+    - Status 'ok': bounce marker, lines, banner, confidence bar
+    - Status 'insufficient_data': small grey note
+    - Age expired (> OVERLAY_HOLD_SECONDS): no overlay drawn
+    """
+    import numpy as np
+    from ai.overlay_hud import draw_post_delivery_hud
+
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    analysis = {
+        "status": "ok",
+        "delivery_type": "OFF_SPIN",
+        "turn_angle_deg": 4.5,
+        "length": "Good Length",
+        "confidence": 0.85,
+        "bounce_xy_m": [0.1, 14.5],
+        "explain": {"reason": "Turned 4.5° off pitch"}
+    }
+    traj = [
+        {"px": 640.0, "py": 100.0, "x": 0.0, "y": 5.0},
+        {"px": 640.0, "py": 300.0, "x": 0.1, "y": 14.5},
+        {"px": 660.0, "py": 500.0, "x": 0.3, "y": 18.0},
+    ]
+
+    # Active hold
+    draw_post_delivery_hud(frame, analysis, overlay_age=1.5, speed_kmh=89.0, trajectory_points=traj)
+    assert np.any(frame > 0)
+
+    # Expired age (> OVERLAY_HOLD_SECONDS)
+    frame_expired = np.zeros((720, 1280, 3), dtype=np.uint8)
+    draw_post_delivery_hud(frame_expired, analysis, overlay_age=6.0, speed_kmh=89.0, trajectory_points=traj)
+    assert not np.any(frame_expired > 0)
+
+    # Status not ok (grey note)
+    frame_note = np.zeros((720, 1280, 3), dtype=np.uint8)
+    draw_post_delivery_hud(frame_note, {"status": "insufficient_data"}, overlay_age=1.0)
+    assert np.any(frame_note > 0)
+
+
