@@ -11,41 +11,15 @@ import cv2
 import numpy as np
 import os
 import base64
-import time
-import json
-import logging
 
 from ai.camera import Camera
 from ai.video_processor import VideoProcessor
 from ai.tracker import ByteTracker
-from ai.speed import SpeedEstimator, pixel_to_ground
+from ai.speed import SpeedEstimator
 from ai.alarm import AlarmSystem
-from ai.track_cleaning import clean_track
-from ai.delivery_analysis import analyze_delivery
-from ai.overlay_hud import draw_live_trail, draw_post_delivery_hud
-from ai.utils import CalibrationManager
-from config import (
-    ENABLE_BALL_ANALYSIS,
-    TURN_MIN_DEG,
-    SWING_MIN_M,
-    LOST_FRAMES_N,
-    OVERLAY_HOLD_SECONDS,
-    ANALYSIS_MAX_AGE_SECONDS,
-    MIN_TRACK_POINTS,
-    MIN_PITCH_SPAN_M
-)
 from database.db_helper import init_db, add_run, get_runs
-from database.scorecard_db import (
-    init_scorecard_db,
-    get_all_matches,
-    get_scorecard_details,
-    clear_all_matches,
-    get_match_deliveries,
-    get_bowler_analysis
-)
+from database.scorecard_db import init_scorecard_db, get_all_matches, get_scorecard_details, delete_match, clear_all_matches
 from ai.scorecard_engine import MatchEngine
-
-logger = logging.getLogger(__name__)
 
 # Initialize Database
 init_db()
@@ -78,25 +52,21 @@ live_estimator = None
 live_alarm = None
 live_detected_speed = 0.0
 live_maximum_speed = 0.0
-
-# Live Delivery Analysis States
-live_delivery_buffer = []
-live_consecutive_tracked = 0
-live_lost_frames = 0
-live_delivery_active = False
-live_batsman_hand = "RIGHT"
-live_calibration_profile = "default"
-
-latest_delivery_analysis = None
-latest_delivery_timestamp = 0.0
-live_last_delivery_points = []
+live_trajectory_points = []
+live_analysis = {
+    "deviation_angle": 0.0,
+    "turn_angle": 0.0,
+    "turn_direction": "Straight",
+    "swing_cm": 0.0,
+    "delivery_type": "STRAIGHT"
+}
 
 # ----------------------------------
 # Generate Camera Frames
 # ----------------------------------
 
 def generate_frames():
-    global live_tracker, live_estimator, live_alarm, live_detected_speed, live_maximum_speed
+    global live_tracker, live_estimator, live_alarm, live_detected_speed, live_maximum_speed, live_trajectory_points, live_analysis
 
     while True:
         frame = camera.get_frame()
@@ -159,6 +129,20 @@ def generate_frames():
                     smoothed_center = primary_track.smoothed_history[-1]
                     current_center = (int(smoothed_center[0]), int(smoothed_center[1]))
                     ball_found = True
+                    live_trajectory_points.append(current_center)
+
+                    # Update real-time movement analysis
+                    if len(live_trajectory_points) >= 6:
+                        try:
+                            from ai.delivery_analysis import analyze_delivery
+                            mv = analyze_delivery(live_trajectory_points, speed_kmh=live_maximum_speed)
+                            live_analysis["deviation_angle"] = mv["deviation_angle_deg"]
+                            live_analysis["turn_angle"] = mv["turn_angle_deg"]
+                            live_analysis["turn_direction"] = mv["turn_direction"]
+                            live_analysis["swing_cm"] = mv["swing_cm"]
+                            live_analysis["delivery_type"] = mv["delivery_type"]
+                        except Exception:
+                            pass
 
                     # Draw live target markers
                     cv2.circle(annotated, current_center, 8, (0, 255, 0), 2)
@@ -173,7 +157,7 @@ def generate_frames():
                         1
                     )
 
-                    # Compute live speed using calibration
+                    # Compute live speed using 5-step principle (strictly towards camera)
                     if len(primary_track.smoothed_history) >= 2:
                         p1 = primary_track.smoothed_history[-2]
                         p2 = primary_track.smoothed_history[-1]
@@ -181,18 +165,21 @@ def generate_frames():
                         instant_speed, pixel_dist = live_estimator.calculate_speed(
                             p1, p2, video_processor.H
                         )
-                        live_detected_speed, valid = live_estimator.validate_and_smooth(
-                            instant_speed, pixel_dist, live_detected_speed
-                        )
-
-                if live_detected_speed > live_maximum_speed:
-                    live_maximum_speed = live_detected_speed
+                        if instant_speed > 0.0:
+                            live_detected_speed = instant_speed
+                            if live_detected_speed > live_maximum_speed:
+                                live_maximum_speed = live_detected_speed
 
                 status, status_color = live_alarm.check(live_detected_speed)
 
-                # Draw Live Trail (Fading Cyan #00f2fe)
+                # Draw Live Trail
                 if ball_found and len(primary_track.smoothed_history) > 1:
-                    draw_live_trail(annotated, primary_track.smoothed_history, current_center)
+                    trail = primary_track.smoothed_history[-25:]
+                    for i in range(1, len(trail)):
+                        thickness = max(1, int(i / 4))
+                        pt1 = (int(trail[i-1][0]), int(trail[i-1][1]))
+                        pt2 = (int(trail[i][0]), int(trail[i][1]))
+                        cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
 
                 # Overlay HUD panel in the top-right
                 h, w, c = annotated.shape
@@ -213,21 +200,6 @@ def generate_frames():
                 detect_text = "TRACKED" if ball_found else "LOST"
                 detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
                 cv2.putText(annotated, detect_text, (x1 + 10, y1 + 125), cv2.FONT_HERSHEY_SIMPLEX, 0.45, detect_color, 2)
-
-                # Post-Delivery HUD Banner Overlay
-                if latest_delivery_analysis and latest_delivery_timestamp > 0:
-                    overlay_age = time.time() - latest_delivery_timestamp
-                    if overlay_age <= OVERLAY_HOLD_SECONDS:
-                        try:
-                            draw_post_delivery_hud(
-                                annotated,
-                                latest_delivery_analysis,
-                                overlay_age=overlay_age,
-                                speed_kmh=live_maximum_speed,
-                                trajectory_points=live_last_delivery_points
-                            )
-                        except Exception as hud_err:
-                            logger.error(f"Error in generate_frames HUD: {hud_err}")
 
             ret, buffer = cv2.imencode(".jpg", annotated)
 
@@ -257,10 +229,10 @@ def video_feed():
 
 @app.route("/start_camera")
 def start_camera():
-    global live_tracker, live_estimator, live_alarm, live_detected_speed, live_maximum_speed
+    global live_tracker, live_estimator, live_alarm, live_detected_speed, live_maximum_speed, live_trajectory_points, live_analysis
     camera.start()
     
-    fps = 30.0
+    fps = 60.0
     max_limit = app.config.get("MAX_SPEED", 70.0)
     
     live_tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
@@ -268,12 +240,20 @@ def start_camera():
     live_alarm = AlarmSystem(speed_limit=max_limit)
     live_detected_speed = 0.0
     live_maximum_speed = 0.0
+    live_trajectory_points = []
+    live_analysis = {
+        "deviation_angle": 0.0,
+        "turn_angle": 0.0,
+        "turn_direction": "Straight",
+        "swing_cm": 0.0,
+        "delivery_type": "STRAIGHT"
+    }
 
     return "Camera Started"
 
 @app.route("/save_live_run", methods=["POST"])
 def save_live_run():
-    global live_maximum_speed, live_alarm
+    global live_maximum_speed, live_alarm, live_trajectory_points, live_analysis
     status = "SAFE"
     if live_alarm is not None and live_maximum_speed > live_alarm.speed_limit:
         status = "NO-BALL"
@@ -282,48 +262,57 @@ def save_live_run():
         run_id = add_run(speed=round(live_maximum_speed, 1), status=status)
         # Reset live maximum speed for the next run
         live_maximum_speed = 0.0
+        live_trajectory_points = []
         return jsonify({"status": "success", "run_id": run_id})
     return jsonify({"status": "error", "message": "No speed to save"}), 400
 
 @app.route("/stop_camera")
 def stop_camera():
-    global live_tracker
+    global live_tracker, live_trajectory_points
     camera.stop()
     live_tracker = None
+    live_trajectory_points = []
     return "Camera Stopped"
 
 @app.route("/camera_stats")
 def camera_stats():
-    global live_detected_speed, live_maximum_speed, live_alarm
+    global live_detected_speed, live_maximum_speed, live_alarm, live_analysis
     status = "SAFE"
     if live_alarm is not None and live_maximum_speed > live_alarm.speed_limit:
         status = "NO-BALL"
     return jsonify({
         "current_speed": round(live_detected_speed, 1),
         "max_speed": round(live_maximum_speed, 1),
-        "status": status
+        "status": status,
+        "deviation_angle": live_analysis.get("deviation_angle", 0.0),
+        "turn_angle": live_analysis.get("turn_angle", 0.0),
+        "turn_direction": live_analysis.get("turn_direction", "Straight"),
+        "swing_cm": live_analysis.get("swing_cm", 0.0),
+        "delivery_type": live_analysis.get("delivery_type", "STRAIGHT")
     })
 
 
 
 # ----------------------------------
-# Upload Progress & Video Processing
+# Upload Video & Progress Tracking
 # ----------------------------------
 
-upload_status = {
-    "percent": 0,
+upload_processing_state = {
     "status": "idle",
+    "percent": 0,
+    "frame": 0,
+    "total_frames": 0,
     "message": ""
 }
 
-@app.route("/api/upload/status", methods=["GET"])
-def get_upload_status():
-    return jsonify(upload_status)
+@app.route("/upload_progress", methods=["GET"])
+def get_upload_progress():
+    global upload_processing_state
+    return jsonify(upload_processing_state)
 
 @app.route("/upload", methods=["POST"])
 def upload_video():
-    global upload_status
-    upload_status = {"percent": 5, "status": "processing", "message": "Saving video..."}
+    global upload_processing_state
     try:
         # Clear previous uploads to save space
         if os.path.exists(app.config["UPLOAD_FOLDER"]):
@@ -336,13 +325,11 @@ def upload_video():
                     print(f"Error deleting file {file_path}: {e}")
 
         if "video" not in request.files:
-            upload_status = {"percent": 0, "status": "error", "message": "No Video Selected"}
             return jsonify({"status": "error", "message": "No Video Selected"}), 400
 
         file = request.files["video"]
 
         if file.filename == "":
-            upload_status = {"percent": 0, "status": "error", "message": "No Video Selected"}
             return jsonify({"status": "error", "message": "No Video Selected"}), 400
 
         max_speed = float(
@@ -360,37 +347,36 @@ def upload_video():
             output_filename
         )
 
+        upload_processing_state["status"] = "uploading"
+        upload_processing_state["percent"] = 0
+        upload_processing_state["frame"] = 0
+        upload_processing_state["total_frames"] = 0
+        upload_processing_state["message"] = "Saving uploaded video footage..."
+
         file.save(input_path)
-
         print(f"Video Saved : {input_path}")
-        upload_status = {"percent": 15, "status": "processing", "message": "Detecting ball & movement..."}
 
-        batsman_hand = request.form.get("batsman_hand", "RIGHT").upper().strip()
-        if batsman_hand not in ("RIGHT", "LEFT"):
-            batsman_hand = "RIGHT"
+        upload_processing_state["status"] = "processing"
+        upload_processing_state["percent"] = 0
+        upload_processing_state["message"] = "Initializing AI model & reading video frames..."
 
-        calibration_profile = request.form.get("calibration_profile", "default")
-
-        def progress_cb(pct):
-            global upload_status
-            upload_status["percent"] = min(95, max(15, int(pct)))
-            upload_status["message"] = f"Processing frames: {upload_status['percent']}%"
+        def on_processing_progress(percent, frame, total_frames, message=""):
+            upload_processing_state["status"] = "processing"
+            upload_processing_state["percent"] = percent
+            upload_processing_state["frame"] = frame
+            upload_processing_state["total_frames"] = total_frames
+            upload_processing_state["message"] = message or f"AI Tracking Delivery: Frame {frame} of {total_frames} ({percent}%)"
 
         result = video_processor.process(
             input_video=input_path,
             output_video=output_path,
             max_speed=max_speed,
-            batsman_hand=batsman_hand,
-            calibration_profile=calibration_profile,
-            progress_callback=progress_cb
+            progress_callback=on_processing_progress
         )
 
-        # Store latest delivery analysis in memory for scorecard auto-linking
-        global latest_delivery_analysis, latest_delivery_timestamp
-        delivery_analysis = result.get("delivery_analysis")
-        if delivery_analysis:
-            latest_delivery_analysis = delivery_analysis
-            latest_delivery_timestamp = time.time()
+        upload_processing_state["status"] = "done"
+        upload_processing_state["percent"] = 100
+        upload_processing_state["message"] = "Delivery processing complete!"
 
         # Save tracking record to database
         add_run(
@@ -399,22 +385,21 @@ def upload_video():
         )
 
         print("Video Processed Successfully")
-        upload_status = {"percent": 100, "status": "completed", "message": "Processing complete!"}
 
         return jsonify({
             "status": "success",
             "video_url": f"/uploads/{output_filename}",
-            "processed_video_url": f"/uploads/{output_filename}",
             "detected_speed": float(result["speed"]),
             "max_speed": max_speed,
             "ball_status": result["status"],
-            "delivery_analysis": delivery_analysis,
-            "deliveries": result.get("deliveries", []),
-            "summary": result.get("summary", {})
+            "deviation_angle": float(result.get("deviation_angle", 0.0)),
+            "turn_angle": float(result.get("turn_angle", 0.0)),
+            "turn_direction": result.get("turn_direction", "Straight"),
+            "swing_cm": float(result.get("swing_cm", 0.0)),
+            "delivery_type": result.get("delivery_type", "STRAIGHT")
         })
     except Exception as e:
         print(f"Video processing error: {e}")
-        upload_status = {"percent": 0, "status": "error", "message": str(e)}
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ----------------------------------
@@ -468,10 +453,8 @@ def save_config():
 @app.route("/process_frame", methods=["POST"])
 def process_frame():
     global live_tracker, live_estimator, live_alarm, live_detected_speed, live_maximum_speed
-    global live_delivery_buffer, live_consecutive_tracked, live_lost_frames, live_delivery_active
-    global live_batsman_hand, live_calibration_profile, latest_delivery_analysis, latest_delivery_timestamp
     
-    data = request.json or {}
+    data = request.json
     
     # Initialize trackers if not active or if reset is requested
     if live_tracker is None or data.get("reset"):
@@ -482,17 +465,6 @@ def process_frame():
         live_alarm = AlarmSystem(speed_limit=max_limit)
         live_detected_speed = 0.0
         live_maximum_speed = 0.0
-        live_delivery_buffer = []
-        live_consecutive_tracked = 0
-        live_lost_frames = 0
-        live_delivery_active = False
-
-    batsman_hand = data.get("batsman_hand", live_batsman_hand)
-    if batsman_hand:
-        batsman_hand = str(batsman_hand).upper().strip()
-        if batsman_hand in ("RIGHT", "LEFT"):
-            live_batsman_hand = batsman_hand
-
     image_data = data.get("image")
     if not image_data:
         return jsonify({"status": "error", "message": "No image data"}), 400
@@ -564,62 +536,24 @@ def process_frame():
             instant_speed, pixel_dist = live_estimator.calculate_speed(
                 p1, p2, video_processor.H
             )
-            live_detected_speed, valid = live_estimator.validate_and_smooth(
-                instant_speed, pixel_dist, live_detected_speed
-            )
-
-    if live_detected_speed > live_maximum_speed:
-        live_maximum_speed = live_detected_speed
+            if instant_speed > 0.0:
+                live_detected_speed = instant_speed
+                if live_detected_speed > live_maximum_speed:
+                    live_maximum_speed = live_detected_speed
 
     status = "SAFE"
     if live_alarm is not None and live_maximum_speed > live_alarm.speed_limit:
         status = "NO-BALL"
     status_color = (0, 255, 0) if status == "SAFE" else (0, 0, 255)
 
-    # ---------------- Trajectory Buffering & Live Delivery Analysis ----------------
-    current_delivery_analysis = None
-    if ball_found and current_center is not None:
-        gx, gy = pixel_to_ground(current_center[0], current_center[1], H=video_processor.H, frame_width=w, frame_height=h)
-        live_consecutive_tracked += 1
-        live_lost_frames = 0
-        if not live_delivery_active and live_consecutive_tracked >= 3:
-            live_delivery_active = True
-        if live_delivery_active:
-            live_delivery_buffer.append({
-                "x": gx,
-                "y": gy,
-                "px": float(current_center[0]),
-                "py": float(current_center[1]),
-                "t": time.time()
-            })
-    else:
-        live_consecutive_tracked = 0
-        if live_delivery_active:
-            live_lost_frames += 1
-
-    # Check delivery completion trigger
-    if live_delivery_active:
-        passed_batsman = (len(live_delivery_buffer) > 0 and live_delivery_buffer[-1]["y"] >= 19.0)
-        lost_track = (live_lost_frames >= LOST_FRAMES_N)
-        if passed_batsman or lost_track:
-            live_delivery_active = False
-            if ENABLE_BALL_ANALYSIS and len(live_delivery_buffer) >= MIN_TRACK_POINTS:
-                cleaned = clean_track(live_delivery_buffer)
-                if cleaned:
-                    try:
-                        an = analyze_delivery(cleaned, batsman_hand=live_batsman_hand, speed_kmh=live_maximum_speed)
-                        latest_delivery_analysis = an
-                        latest_delivery_timestamp = time.time()
-                        live_last_delivery_points = list(cleaned)
-                        current_delivery_analysis = an
-                    except Exception as err:
-                        logger.error(f"Error in live analyze_delivery: {err}")
-            live_delivery_buffer = []
-            live_lost_frames = 0
-
-    # Draw live trail (Fading Cyan #00f2fe)
+    # Draw live trail
     if ball_found and len(primary_track.smoothed_history) > 1:
-        draw_live_trail(annotated, primary_track.smoothed_history, current_center)
+        trail = primary_track.smoothed_history[-25:]
+        for i in range(1, len(trail)):
+            thickness = max(1, int(i / 4))
+            pt1 = (int(trail[i-1][0]), int(trail[i-1][1]))
+            pt2 = (int(trail[i][0]), int(trail[i][1]))
+            cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
 
     # Overlay HUD panel in the top-right
     box_width = 210
@@ -640,36 +574,22 @@ def process_frame():
     detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
     cv2.putText(annotated, detect_text, (x1 + 10, y1 + 125), cv2.FONT_HERSHEY_SIMPLEX, 0.45, detect_color, 2)
 
-    # Post-Delivery HUD Banner Overlay
-    if latest_delivery_analysis and latest_delivery_timestamp > 0:
-        overlay_age = time.time() - latest_delivery_timestamp
-        if overlay_age <= OVERLAY_HOLD_SECONDS:
-            try:
-                draw_post_delivery_hud(
-                    annotated,
-                    latest_delivery_analysis,
-                    overlay_age=overlay_age,
-                    speed_kmh=live_maximum_speed,
-                    trajectory_points=live_last_delivery_points
-                )
-            except Exception as hud_err:
-                logger.error(f"Error in process_frame HUD: {hud_err}")
-
     # Encode back to base64
     ret, jpeg = cv2.imencode(".jpg", annotated)
     processed_base64 = "data:image/jpeg;base64," + base64.b64encode(jpeg.tobytes()).decode("utf-8")
-
-    is_fresh = False
-    if latest_delivery_timestamp > 0 and (time.time() - latest_delivery_timestamp) <= ANALYSIS_MAX_AGE_SECONDS:
-        is_fresh = True
+    
+    # Save the run to MongoDB on peak speed update
+    if ball_found and live_maximum_speed > 0:
+        # We can add run records to MongoDB periodically or at the end.
+        # Let's save on status change or periodically.
+        # But to be safe, we just save each run to DB.
+        pass
 
     return jsonify({
         "current_speed": round(live_detected_speed, 1),
         "max_speed": round(live_maximum_speed, 1),
         "status": status,
-        "image": processed_base64,
-        "delivery_analysis": current_delivery_analysis or (latest_delivery_analysis if is_fresh else None),
-        "has_fresh_analysis": is_fresh
+        "image": processed_base64
     })
 
 # ----------------------------------
@@ -695,8 +615,6 @@ def api_setup_innings():
     non_striker = data.get("non_striker", "Batter 2")
     bowler = data.get("bowler", "Bowler 1")
     target = int(data.get("target", 0))
-    if target == 0:
-        target = active_match_engine.target
     current_innings = int(data.get("current_innings", 1))
     
     active_match_engine.setup_innings(striker, non_striker, bowler, target=target, current_innings=current_innings)
@@ -708,7 +626,6 @@ def api_match_state():
 
 @app.route("/api/match/ball", methods=["POST"])
 def api_record_ball():
-    global latest_delivery_analysis, latest_delivery_timestamp
     data = request.json or {}
     mode = data.get("mode", "NORMAL")
     runs = int(data.get("runs", 0))
@@ -719,113 +636,11 @@ def api_record_ball():
     # Check if live camera speed is available to link
     speed_kmh = float(data.get("speed_kmh", live_maximum_speed if live_maximum_speed > 0 else 0.0))
     
-    # Optional delivery analysis fields
-    delivery_type = data.get("delivery_type")
-    spin_type = data.get("spin_type")
-    swing_type = data.get("swing_type")
-    turn_angle_deg = data.get("turn_angle_deg")
-    swing_cm = data.get("swing_cm")
-    bounce_x = data.get("bounce_x")
-    bounce_y = data.get("bounce_y")
-    length = data.get("length")
-    line = data.get("line")
-    analysis_confidence = data.get("analysis_confidence")
-    analysis_json = data.get("analysis_json")
-
-    # Auto-linking if not explicitly provided and not discarded
-    discard = data.get("discard_analysis", False)
-    if not discard and delivery_type is None and latest_delivery_analysis is not None:
-        age = time.time() - latest_delivery_timestamp
-        if age <= ANALYSIS_MAX_AGE_SECONDS:
-            an = latest_delivery_analysis
-            delivery_type = an.get("delivery_type")
-            spin_type = an.get("spin_type")
-            swing_type = an.get("swing_type")
-            turn_angle_deg = an.get("turn_angle_deg")
-            swing_cm = an.get("swing_cm")
-            b_xy = an.get("bounce_xy_m")
-            if b_xy and len(b_xy) == 2:
-                bounce_x = b_xy[0]
-                bounce_y = b_xy[1]
-            length = an.get("length")
-            line = an.get("line")
-            analysis_confidence = an.get("confidence")
-            analysis_json = json.dumps(an)
-
-            # Consume so it doesn't attach to another delivery
-            latest_delivery_analysis = None
-            latest_delivery_timestamp = 0.0
-    elif discard:
-        latest_delivery_analysis = None
-        latest_delivery_timestamp = 0.0
-
     res = active_match_engine.record_delivery(
         mode=mode, runs=runs, wicket_desc=wicket_desc,
-        new_batsman=new_batsman, who_out=who_out, speed_kmh=speed_kmh,
-        delivery_type=delivery_type, spin_type=spin_type, swing_type=swing_type,
-        turn_angle_deg=turn_angle_deg, swing_cm=swing_cm,
-        bounce_x=bounce_x, bounce_y=bounce_y, length=length, line=line,
-        analysis_confidence=analysis_confidence, analysis_json=analysis_json
+        new_batsman=new_batsman, who_out=who_out, speed_kmh=speed_kmh
     )
     return jsonify(res)
-
-@app.route("/api/match/deliveries", methods=["GET"])
-def api_match_deliveries():
-    match_id = request.args.get("match_id", type=int)
-    if not match_id and active_match_engine.match_id:
-        match_id = active_match_engine.match_id
-    if not match_id:
-        return jsonify([])
-    deliveries = get_match_deliveries(match_id)
-    return jsonify(deliveries)
-
-@app.route("/api/bowler/analysis", methods=["GET"])
-def api_bowler_analysis():
-    match_id = request.args.get("match_id", type=int)
-    if not match_id and active_match_engine.match_id:
-        match_id = active_match_engine.match_id
-    bowler_name = request.args.get("bowler")
-    analysis = get_bowler_analysis(match_id=match_id, bowler_name=bowler_name)
-    return jsonify(analysis)
-
-@app.route("/api/analysis/latest", methods=["GET"])
-def api_latest_analysis():
-    global latest_delivery_analysis, latest_delivery_timestamp
-    if latest_delivery_analysis is None:
-        return jsonify({"analysis": None, "is_fresh": False, "age_seconds": None})
-    age = time.time() - latest_delivery_timestamp
-    is_fresh = age <= ANALYSIS_MAX_AGE_SECONDS
-    return jsonify({
-        "analysis": latest_delivery_analysis if is_fresh else None,
-        "is_fresh": is_fresh,
-        "age_seconds": round(age, 1)
-    })
-
-@app.route("/api/analysis/discard", methods=["POST"])
-def api_discard_analysis():
-    global latest_delivery_analysis, latest_delivery_timestamp
-    latest_delivery_analysis = None
-    latest_delivery_timestamp = 0.0
-    return jsonify({"status": "success", "message": "Latest delivery analysis discarded"})
-
-@app.route("/api/calibration/profiles", methods=["GET"])
-def api_calibration_profiles():
-    mgr = CalibrationManager()
-    profiles = mgr.list_profiles()
-    return jsonify({"profiles": profiles, "active": live_calibration_profile})
-
-@app.route("/api/calibration/select", methods=["POST"])
-def api_select_calibration():
-    global live_calibration_profile
-    data = request.json or {}
-    profile = data.get("profile", "default")
-    mgr = CalibrationManager()
-    image_points, real_world_points, H = mgr.load_calibration(profile=profile)
-    if H is not None:
-        video_processor.H = H
-        live_calibration_profile = profile
-        return jsonify({"status": "success", "active_profile": profile})
-    return jsonify({"status": "error", "message": f"Profile '{profile}' not found"}), 404
 
 @app.route("/api/match/undo", methods=["POST"])
 def api_match_undo():
@@ -854,19 +669,16 @@ def api_matches_list():
     matches = get_all_matches()
     return jsonify(matches)
 
+@app.route("/api/match/delete/<int:match_id>", methods=["POST", "DELETE"])
+@app.route("/api/match/<int:match_id>", methods=["DELETE"])
+def api_delete_match(match_id):
+    delete_match(match_id)
+    return jsonify({"status": "success", "message": f"Match {match_id} deleted."})
+
 @app.route("/api/matches/clear", methods=["POST"])
 def api_clear_matches():
     clear_all_matches()
-    active_match_engine.match_id = None
-    active_match_engine.status = "IDLE"
-    active_match_engine.runs = 0
-    active_match_engine.wickets = 0
-    active_match_engine.balls = 0
-    active_match_engine.batting = {}
-    active_match_engine.bowling = {}
-    active_match_engine.history = []
-    active_match_engine.over_deliveries = []
-    return jsonify({"status": "success", "message": "All match history deleted successfully."})
+    return jsonify({"status": "success", "message": "All matches cleared."})
 
 # Fallback route for React Single Page Application (SPA)
 @app.route('/', defaults={'path': ''})
@@ -881,11 +693,6 @@ def serve_spa(path):
 # ----------------------------------
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("⚡ CricSpeed AI RUNNING ON HTTP")
-    print("👉 Open Mobile Link: http://10.62.35.100:5050")
-    print("="*60 + "\n")
-
     app.run(
         host="0.0.0.0",
         port=5050,

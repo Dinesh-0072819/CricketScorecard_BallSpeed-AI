@@ -1,5 +1,29 @@
+# Python
 venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+
+# Frontend generated files
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+
+# Logs and temporary files
+logs/
 .DS_Store
+
+# Project backups
+CricSpeedAI.zip
+
+# Local database and uploaded videos
+database/scorecard.db
+uploads/
+
+# Large AI model files
+weights/

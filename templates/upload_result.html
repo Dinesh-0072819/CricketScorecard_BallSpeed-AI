@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="page-title">📊 Analysis Results</h1>
+
+<div class="upload-container" style="max-width: 1200px; margin: 0 auto; gap: 40px; display: flex; flex-wrap: wrap;">
+    <!-- Video Player Card -->
+    <div class="upload-card" style="flex: 2 1 600px; max-width: 750px;">
+        <h2>Processed Video Output</h2>
+        <p class="upload-text">Watch the AI track the ball and display instantaneous speed overlays below.</p>
+        
+        <div style="border-radius: 12px; overflow: hidden; border: 2px solid #334155; background: #000;">
+            <video width="100%" controls style="display: block;">
+                <source src="{{ url_for('uploaded_file', filename=video) }}" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        </div>
+
+        <div style="margin-top: 25px; display: flex; gap: 15px; justify-content: center;">
+            <a href="/upload" style="text-decoration: none;">
+                <button class="start-btn" style="margin: 0; padding: 12px 30px;">
+                    🔄 Analyze Another Video
+                </button>
+            </a>
+            <a href="/reports" style="text-decoration: none;">
+                <button class="stop-btn" style="margin: 0; padding: 12px 30px; background: #475569;">
+                    📄 View All Reports
+                </button>
+            </a>
+        </div>
+    </div>
+
+    <!-- Stats & Speed Radar Card -->
+    <div class="upload-status" style="flex: 1 1 350px; max-width: 450px; height: fit-content; text-align: left;">
+        <h2 style="text-align: center; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 15px;">
+            ⚡ Ball Speed Radar
+        </h2>
+        
+        <div style="text-align: center; margin-bottom: 30px;">
+            <span style="font-size: 14px; text-transform: uppercase; color: #94A3B8; font-weight: 600; letter-spacing: 1px;">
+                Maximum Bowling Speed
+            </span>
+            <div style="font-size: 65px; font-weight: 800; line-height: 1.1; margin: 10px 0; color: {% if status == 'NO-BALL' or status == 'IPL NO-BALL' or status == 'ALARM' %}#EF4444{% else %}#22C55E{% endif %};">
+                {{ detected_speed }} <span style="font-size: 28px; font-weight: 500;">km/h</span>
+            </div>
+            
+            <!-- Warning Badge -->
+            <div style="display: inline-block; padding: 6px 16px; border-radius: 20px; font-weight: 700; font-size: 14px; text-transform: uppercase;
+                        background: {% if status == 'NO-BALL' or status == 'IPL NO-BALL' or status == 'ALARM' %}rgba(239, 68, 68, 0.15){% else %}rgba(34, 197, 94, 0.15){% endif %};
+                        color: {% if status == 'NO-BALL' or status == 'IPL NO-BALL' or status == 'ALARM' %}#EF4444{% else %}#22C55E{% endif %};
+                        border: 1.5px solid {% if status == 'NO-BALL' or status == 'IPL NO-BALL' or status == 'ALARM' %}rgba(239, 68, 68, 0.3){% else %}rgba(34, 197, 94, 0.3){% endif %};">
+                {% if status == 'NO-BALL' or status == 'IPL NO-BALL' or status == 'ALARM' %}🚨 NO-BALL{% else %}✅ SAFE SPEED{% endif %}
+            </div>
+        </div>
+
+        <div style="background: #0F172A; padding: 20px; border-radius: 12px; border: 1px solid #334155; line-height: 1.8;">
+            <div style="display: flex; justify-content: space-between;">
+                <span style="color: #94A3B8;">Max Speed Allowed:</span>
+                <strong style="color: #F8FAFC;">{{ max_speed }} km/h</strong>
+            </div>
+        </div>
+
+        <div class="workflow" style="margin-top: 25px; padding: 15px; background: rgba(56, 189, 248, 0.05); border-radius: 12px; border: 1.5px dashed rgba(56, 189, 248, 0.2); font-size: 14px;">
+            ℹ️ <strong>Note:</strong> The trajectory coordinates were smoothed using a 2D Kalman filter and processed through the Homography calibration matrix to calculate the true speed.
+        </div>
+    </div>
+</div>
+
+{% if status == 'NO-BALL' or status == 'IPL NO-BALL' or status == 'ALARM' %}
+<script>
+let alarmAudio = null;
+let sirenPlaying = false;
+
+function playNoBallSiren() {
+    if (sirenPlaying) return;
+    sirenPlaying = true;
+    
+    try {
+        if (!alarmAudio) {
+            alarmAudio = new Audio("/static/sounds/no_ball.mp3");
+        }
+        alarmAudio.currentTime = 0;
+        alarmAudio.play().catch(e => console.error("Audio playback failed:", e));
+        
+        setTimeout(() => {
+            sirenPlaying = false;
+        }, 3000);
+    } catch (e) {
+        console.error("Failed to play no-ball audio:", e);
+        sirenPlaying = false;
+    }
+}
+
+// Play as soon as user interacts with the page (to bypass browser autoplay restrictions)
+document.addEventListener('click', () => {
+    playNoBallSiren();
+}, { once: true });
+
+// Also try to play automatically
+window.addEventListener('load', () => {
+    playNoBallSiren();
+});
+</script>
+{% endif %}
+{% endblock %}

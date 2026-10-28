@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>SmartSpeed AI</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+
+    <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+
+</head>
+
+<body>
+
+<header class="navbar">
+
+    <div class="logo">
+
+        ⚡ SmartSpeed AI
+
+    </div>
+
+    <nav>
+
+        <a href="/">Home</a>
+
+        <a href="/dashboard">Dashboard</a>
+
+        <a href="/camera">Live Camera</a>
+
+        <a href="/reports">Reports</a>
+
+        <a href="/analytics">Analytics</a>
+
+        <a href="/settings">Settings</a>
+
+    </nav>
+
+</header>
+
+<main>
+
+    {% block content %}
+
+    {% endblock %}
+
+</main>
+
+<footer>
+
+    © 2026 SmartSpeed AI • AI Bowling Speed Detection System
+
+</footer>
+
+</body>
+
+</html>

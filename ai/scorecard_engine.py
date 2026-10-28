@@ -41,32 +41,12 @@ class MatchEngine:
         self.total_overs = int(total_overs)
         self.toss_winner = toss_winner
         self.toss_decision = toss_decision
-        
-        self.current_innings = 1
-        self.target = 0
-        self.status = "LIVE"
-        self.winner = ""
-        self.runs = 0
-        self.wickets = 0
-        self.balls = 0
-        self.striker = ""
-        self.non_striker = ""
-        self.bowler = ""
-        self.batting = {}
-        self.bowling = {}
-        self.over_deliveries = []
-        self.runs_this_over = 0
-        self.history = []
-
         self.match_id = create_match(team1, team2, self.total_overs, toss_winner, toss_decision)
         return self.match_id
 
     def setup_innings(self, striker, non_striker, bowler, target=0, current_innings=1):
         self.current_innings = current_innings
-        if target > 0:
-            self.target = target
-        self.status = "LIVE"
-        self.winner = ""
+        self.target = target
         self.striker = striker
         self.non_striker = non_striker
         self.bowler = bowler
@@ -77,13 +57,10 @@ class MatchEngine:
         self.over_deliveries = []
         self.runs_this_over = 0
         
-        self.batting = {}
-        self.bowling = {}
         self.batting[striker] = {"runs": 0, "balls": 0, "fours": 0, "sixes": 0, "out_desc": "not out"}
         self.batting[non_striker] = {"runs": 0, "balls": 0, "fours": 0, "sixes": 0, "out_desc": "not out"}
         self.bowling[bowler] = {"balls": 0, "maidens": 0, "runs": 0, "wickets": 0, "runsInCurrentOver": 0, "max_speed": 0.0}
         
-        update_match_status(self.match_id, current_innings=current_innings, target=self.target, status="LIVE", winner="")
         self._sync_db()
 
     def load_match(self, match_id):
@@ -105,32 +82,12 @@ class MatchEngine:
     def swap_batsmen(self):
         self.striker, self.non_striker = self.non_striker, self.striker
 
-    def record_delivery(
-        self,
-        mode="NORMAL",
-        runs=0,
-        wicket_desc=None,
-        new_batsman=None,
-        who_out=None,
-        speed_kmh=0.0,
-        delivery_type=None,
-        spin_type=None,
-        swing_type=None,
-        turn_angle_deg=None,
-        swing_cm=None,
-        bounce_x=None,
-        bounce_y=None,
-        length=None,
-        line=None,
-        analysis_confidence=None,
-        analysis_json=None
-    ):
+    def record_delivery(self, mode="NORMAL", runs=0, wicket_desc=None, new_batsman=None, who_out=None, speed_kmh=0.0):
         """
         mode: 'NORMAL', 'WIDE', 'NOBALL', 'LB', 'BYE', 'WICKET', 'RUN_WICKET'
-        Accepts optional ball movement analysis parameters to store with the delivery.
         """
-        if self.status in ("COMPLETED", "INNINGS_BREAK"):
-            return {"error": f"Scoring stopped. Current match status is {self.status}"}
+        if self.status == "COMPLETED":
+            return {"error": "Match already completed"}
 
         # Snapshot for undo
         snapshot = self._take_snapshot()
@@ -257,18 +214,7 @@ class MatchEngine:
             runs=runs_added,
             extra_type=extra_type,
             wicket=wicket_flag,
-            speed_kmh=speed_kmh,
-            delivery_type=delivery_type,
-            spin_type=spin_type,
-            swing_type=swing_type,
-            turn_angle_deg=turn_angle_deg,
-            swing_cm=swing_cm,
-            bounce_x=bounce_x,
-            bounce_y=bounce_y,
-            length=length,
-            line=line,
-            analysis_confidence=analysis_confidence,
-            analysis_json=analysis_json
+            speed_kmh=speed_kmh
         )
 
         self._sync_db()
@@ -286,8 +232,6 @@ class MatchEngine:
             self.swap_batsmen() # End of over strike rotation
 
         self._check_match_completion()
-        if self.status in ("INNINGS_BREAK", "COMPLETED"):
-            over_completed = False
         return self.get_state(over_completed=over_completed)
 
     def undo(self):
@@ -315,41 +259,26 @@ class MatchEngine:
         if r == 6: return "6"
         return str(r)
 
-    def _get_team_roles(self):
-        if self.toss_winner == self.team1:
-            bat_first = self.team1 if self.toss_decision == "BAT" else self.team2
-        else:
-            bat_first = self.team2 if self.toss_decision == "BAT" else self.team1
-            
-        bat_second = self.team2 if bat_first == self.team1 else self.team1
-
-        if self.current_innings == 1:
-            return bat_first, bat_second
-        else:
-            return bat_second, bat_first
-
     def _check_match_completion(self):
         max_balls = self.total_overs * 6
-        batting_team, bowling_team = self._get_team_roles()
-
         if self.current_innings == 1:
             if self.wickets >= 10 or self.balls >= max_balls:
                 self.target = self.runs + 1
-                self.status = "INNINGS_BREAK"
-                update_match_status(self.match_id, current_innings=2, target=self.target, status="INNINGS_BREAK")
+                update_match_status(self.match_id, current_innings=2, target=self.target)
         elif self.current_innings == 2:
             if self.runs >= self.target:
                 self.status = "COMPLETED"
-                wickets_left = 10 - self.wickets
-                self.winner = f"{batting_team} won by {wickets_left} {'wicket' if wickets_left == 1 else 'wickets'}"
+                chasing_team = self.team2 if self.toss_decision == "BAT" else self.team1
+                self.winner = f"{chasing_team} won by {10 - self.wickets} wickets"
                 update_match_status(self.match_id, status="COMPLETED", winner=self.winner)
             elif self.wickets >= 10 or self.balls >= max_balls:
                 self.status = "COMPLETED"
+                defending_team = self.team1 if self.toss_decision == "BAT" else self.team2
                 margin = (self.target - 1) - self.runs
                 if margin == 0:
                     self.winner = "Match Tied"
                 else:
-                    self.winner = f"{bowling_team} won by {margin} {'run' if margin == 1 else 'runs'}"
+                    self.winner = f"{defending_team} won by {margin} runs"
                 update_match_status(self.match_id, status="COMPLETED", winner=self.winner)
 
     def _sync_db(self):
@@ -379,8 +308,7 @@ class MatchEngine:
             "runs_this_over": self.runs_this_over,
             "status": self.status,
             "winner": self.winner,
-            "target": self.target,
-            "current_innings": self.current_innings
+            "target": self.target
         }
 
     def _restore_snapshot(self, snap):
@@ -397,7 +325,6 @@ class MatchEngine:
         self.status = snap["status"]
         self.winner = snap["winner"]
         self.target = snap["target"]
-        self.current_innings = snap["current_innings"]
 
     def get_state(self, over_completed=False):
         overs_formatted = f"{self.balls // 6}.{self.balls % 6}"
@@ -407,14 +334,10 @@ class MatchEngine:
         remaining_runs = self.target - self.runs if self.target > 0 else 0
         rrr = round((remaining_runs / (remaining_balls / 6.0)), 2) if (remaining_balls > 0 and self.current_innings == 2) else 0.0
 
-        batting_team, bowling_team = self._get_team_roles()
-
         return {
             "match_id": self.match_id,
             "team1": self.team1,
             "team2": self.team2,
-            "batting_team": batting_team,
-            "bowling_team": bowling_team,
             "total_overs": self.total_overs,
             "current_innings": self.current_innings,
             "runs": self.runs,

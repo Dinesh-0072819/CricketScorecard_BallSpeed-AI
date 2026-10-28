@@ -1,0 +1,331 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<h1 class="page-title">
+    Live Bowling Speed Monitor
+</h1>
+
+<div class="camera-page" style="display: flex; gap: 30px; max-width: 1200px; margin: 0 auto; flex-wrap: wrap;">
+
+    <!-- Camera stream container -->
+    <div class="camera-box" style="flex: 2 1 600px; background: #0F172A; border-radius: 16px; overflow: hidden; border: 2px solid #334155; position: relative; min-height: 400px; display: flex; align-items: center; justify-content: center;">
+        <img id="camera-feed"
+             src=""
+             width="100%"
+             height="100%"
+             style="border-radius:15px; object-fit:contain; display: block;">
+        
+        <!-- Hidden video and canvas for client-side mobile camera stream -->
+        <video id="mobile-video" autoplay playsinline muted style="display: none; width: 640px; height: 480px;"></video>
+        <canvas id="mobile-canvas" width="640" height="480" style="display: none;"></canvas>
+        
+        <div id="no-feed-placeholder" style="color: #64748B; text-align: center; padding: 20px;">
+            <p style="font-size: 48px; margin: 0;">📹</p>
+            <p style="margin-top: 10px; font-weight: 600;">Feed not active. Click "Start Detection" to begin.</p>
+        </div>
+    </div>
+
+    <!-- Controls panel -->
+    <div class="speed-box" style="flex: 1 1 350px; background: #1E293B; border-radius: 16px; padding: 30px; border: 1px solid #334155; box-shadow: 0 10px 30px rgba(0,0,0,0.35); text-align: center; height: fit-content;">
+
+        <!-- Mode Toggle Switcher -->
+        <button id="toggle-mode-btn" class="start-btn" onclick="toggleCameraMode()" style="background: #475569; margin-bottom: 20px; font-size: 14px; width: 100%; border: 1px solid #64748B;">
+            📱 Switch to Mobile Camera
+        </button>
+
+        <h2 style="color: #F8FAFC; margin-bottom: 10px; font-size: 20px;">● Live Tracking</h2>
+
+        <div class="speed-value" id="speed" style="font-size: 48px; font-weight: 800; color: #38BDF8; margin: 20px 0;">
+            0.0 km/h
+        </div>
+
+        <div class="status-safe" id="status" style="font-size: 16px; font-weight: 600; color: #94A3B8; margin-bottom: 30px;">
+            ⚪ Detection Inactive
+        </div>
+
+        <div class="max-speed" style="background: #0F172A; padding: 15px; border-radius: 8px; border: 1px solid #334155; margin-bottom: 25px;">
+            <span style="color: #94A3B8; font-size: 14px;">Maximum Allowed Limit</span>
+            <br>
+            <strong style="color: #F8FAFC; font-size: 24px; display: inline-block; margin-top: 5px;">{{ max_speed }} km/h</strong>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            <button class="start-btn" onclick="startDetection()" style="width: 100%; margin: 0; padding: 14px;">
+                ▶ Start Detection
+            </button>
+
+            <button class="stop-btn" onclick="stopDetection()" style="width: 100%; margin: 0; padding: 14px;">
+                ■ Stop Detection
+            </button>
+
+            <button id="save-run-btn" class="start-btn" onclick="saveRun()" style="width: 100%; margin: 0; padding: 14px; background: #10B981; border: none; display: none;">
+                💾 Save Run to Database
+            </button>
+        </div>
+        
+        <div id="save-message" style="margin-top: 15px; font-weight: 600; text-align: center;"></div>
+
+    </div>
+
+</div>
+
+<script>
+let statsInterval = null;
+let streamActive = false;
+let cameraMode = "pc"; // "pc" or "mobile"
+
+// Mobile streaming elements
+let mobileStream = null;
+let mobileInterval = null;
+const mobileVideo = document.getElementById("mobile-video");
+const mobileCanvas = document.getElementById("mobile-canvas");
+const canvasCtx = mobileCanvas.getContext("2d");
+
+// Sound trigger variables
+let alarmAudio = null;
+let sirenPlaying = false;
+let maxRecordedSpeed = 0.0;
+
+function toggleCameraMode() {
+    if (streamActive) {
+        alert("Please stop current detection before switching camera source.");
+        return;
+    }
+    
+    const btn = document.getElementById("toggle-mode-btn");
+    const feedImg = document.getElementById("camera-feed");
+    const placeholder = document.getElementById("no-feed-placeholder");
+    
+    if (cameraMode === "pc") {
+        cameraMode = "mobile";
+        btn.innerHTML = "💻 Switch to PC Webcam";
+        placeholder.innerHTML = `<p style="font-size: 48px; margin: 0;">📱</p><p style="margin-top: 10px; font-weight: 600;">Mobile Camera Selected. Click "Start Detection" to start stream.</p>`;
+    } else {
+        cameraMode = "pc";
+        btn.innerHTML = "📱 Switch to Mobile Camera";
+        placeholder.innerHTML = `<p style="font-size: 48px; margin: 0;">📹</p><p style="margin-top: 10px; font-weight: 600;">PC Webcam Selected. Click "Start Detection" to start stream.</p>`;
+    }
+    feedImg.src = "";
+    feedImg.style.display = "none";
+    placeholder.style.display = "block";
+    document.getElementById("save-run-btn").style.display = "none";
+    document.getElementById("save-message").innerHTML = "";
+}
+
+function startDetection() {
+    document.getElementById("save-message").innerHTML = "";
+    document.getElementById("save-run-btn").style.display = "none";
+    maxRecordedSpeed = 0.0;
+    streamActive = true;
+    
+    document.getElementById("no-feed-placeholder").style.display = "none";
+    const feedImg = document.getElementById("camera-feed");
+    feedImg.style.display = "block";
+    
+    if (cameraMode === "pc") {
+        startPcCamera();
+    } else {
+        startMobileCamera();
+    }
+}
+
+function stopDetection() {
+    streamActive = false;
+    
+    if (cameraMode === "pc") {
+        stopPcCamera();
+    } else {
+        stopMobileCamera();
+    }
+    
+    // Show save button if speed has been recorded
+    if (maxRecordedSpeed > 0) {
+        document.getElementById("save-run-btn").style.display = "block";
+    }
+}
+
+// ---------------- PC WEB CAMERA CONTROLS ----------------
+function startPcCamera(){
+    fetch("/start_camera")
+    .then(() => {
+        document.getElementById("camera-feed").src = "/video_feed?" + new Date().getTime();
+        document.getElementById("status").innerHTML = "🟢 Camera Active (PC)";
+        document.getElementById("status").style.color = "#22C55E";
+
+        if (statsInterval) clearInterval(statsInterval);
+        statsInterval = setInterval(updatePcStats, 300);
+    });
+}
+
+function stopPcCamera(){
+    fetch("/stop_camera")
+    .then(() => {
+        document.getElementById("status").innerHTML = "⚪ Detection Stopped";
+        document.getElementById("status").style.color = "#94A3B8";
+        
+        if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+        }
+    });
+}
+
+function updatePcStats() {
+    fetch("/camera_stats")
+    .then(response => response.json())
+    .then(data => {
+        maxRecordedSpeed = data.max_speed;
+        document.getElementById("speed").innerHTML = data.max_speed.toFixed(1) + " km/h";
+        
+        const statusEl = document.getElementById("status");
+        if (data.status === "NO-BALL" || data.status === "IPL NO-BALL" || data.status === "ALARM") {
+            statusEl.innerHTML = "🚨 NO-BALL! Speed Exceeded";
+            statusEl.style.color = "#EF4444";
+            playNoBallSiren();
+        } else {
+            statusEl.innerHTML = "🟢 Active (Safe)";
+            statusEl.style.color = "#22C55E";
+        }
+    })
+    .catch(err => console.error("Error fetching camera stats:", err));
+}
+
+// ---------------- MOBILE CAMERA CONTROLS ----------------
+function startMobileCamera() {
+    document.getElementById("status").innerHTML = "🟢 Requesting Device Camera...";
+    document.getElementById("status").style.color = "#EAB308";
+    
+    const constraints = {
+        video: {
+            facingMode: "environment", // Use rear camera if available
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+        },
+        audio: false
+    };
+    
+    navigator.mediaDevices.getUserMedia(constraints)
+    .then(stream => {
+        mobileStream = stream;
+        mobileVideo.srcObject = stream;
+        mobileVideo.play();
+        
+        document.getElementById("status").innerHTML = "🟢 Camera Active (Mobile Device)";
+        document.getElementById("status").style.color = "#22C55E";
+        
+        // Start streaming frames to process_frame endpoint (approx 12-15 FPS)
+        let isFirstFrame = true;
+        mobileInterval = setInterval(() => {
+            if (!streamActive) return;
+            
+            // Draw video frame onto canvas
+            canvasCtx.drawImage(mobileVideo, 0, 0, mobileCanvas.width, mobileCanvas.height);
+            const base64Image = mobileCanvas.toDataURL("image/jpeg", 0.6); // Compress to 60% quality
+            
+            fetch("/process_frame", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: base64Image,
+                    reset: isFirstFrame
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                isFirstFrame = false;
+                if (data.status === "error") {
+                    console.error("Frame processing error:", data.message);
+                    return;
+                }
+                
+                // Show annotated frame returned from server
+                document.getElementById("camera-feed").src = data.image;
+                document.getElementById("speed").innerHTML = data.max_speed.toFixed(1) + " km/h";
+                maxRecordedSpeed = data.max_speed;
+                
+                const statusEl = document.getElementById("status");
+                if (data.status === "NO-BALL") {
+                    statusEl.innerHTML = "🚨 NO-BALL! Speed Exceeded";
+                    statusEl.style.color = "#EF4444";
+                    playNoBallSiren();
+                } else {
+                    statusEl.innerHTML = "🟢 Active (Safe)";
+                    statusEl.style.color = "#22C55E";
+                }
+            })
+            .catch(err => console.error("Error processing mobile frame:", err));
+            
+        }, 80); // Send frame every 80ms (12.5 FPS)
+    })
+    .catch(err => {
+        console.error("Device camera access denied/unsupported:", err);
+        document.getElementById("status").innerHTML = "❌ Camera Access Denied / Unavailable";
+        document.getElementById("status").style.color = "#EF4444";
+        stopDetection();
+    });
+}
+
+function stopMobileCamera() {
+    document.getElementById("status").innerHTML = "⚪ Detection Stopped";
+    document.getElementById("status").style.color = "#94A3B8";
+    
+    if (mobileInterval) {
+        clearInterval(mobileInterval);
+        mobileInterval = null;
+    }
+    
+    if (mobileStream) {
+        mobileStream.getTracks().forEach(track => track.stop());
+        mobileStream = null;
+    }
+    
+    mobileVideo.srcObject = null;
+}
+
+// ---------------- ALARM AND RUN UTILS ----------------
+function playNoBallSiren() {
+    if (sirenPlaying) return;
+    sirenPlaying = true;
+    
+    try {
+        if (!alarmAudio) {
+            alarmAudio = new Audio("/static/sounds/no_ball.mp3");
+        }
+        alarmAudio.currentTime = 0;
+        alarmAudio.play().catch(e => console.error("Audio playback failed:", e));
+        
+        setTimeout(() => {
+            sirenPlaying = false;
+        }, 3000);
+    } catch (e) {
+        console.error("Failed to play no-ball audio:", e);
+        sirenPlaying = false;
+    }
+}
+
+function saveRun() {
+    const msgDiv = document.getElementById("save-message");
+    msgDiv.style.color = "#38BDF8";
+    msgDiv.innerHTML = "Saving run to database...";
+    
+    fetch("/save_live_run", { method: "POST" })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === "success") {
+            msgDiv.style.color = "#10B981";
+            msgDiv.innerHTML = `✅ Delivery saved successfully! (Run ID: ${data.run_id})`;
+            document.getElementById("save-run-btn").style.display = "none";
+        } else {
+            msgDiv.style.color = "#EF4444";
+            msgDiv.innerHTML = "❌ Error saving run: " + data.message;
+        }
+    })
+    .catch(err => {
+        msgDiv.style.color = "#EF4444";
+        msgDiv.innerHTML = "❌ Network error: " + err;
+    });
+}
+</script>
+
+{% endblock %}

@@ -42,173 +42,91 @@ export default function MatchSetupModal({ isOpen, onClose, onMatchCreated }) {
   return (
     <div style={{
       position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-      background: 'rgba(0, 0, 0, 0.88)', backdropFilter: 'blur(16px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '12px'
+      background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(12px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
     }}>
-      <div className="glass-panel mobile-full-modal" style={{
-        width: '640px', maxWidth: '100%', maxHeight: '94vh', overflowY: 'auto',
-        padding: '28px', position: 'relative', borderColor: 'rgba(0, 242, 254, 0.4)'
-      }}>
-        <button
-          onClick={onClose}
-          style={{ position: 'absolute', top: '20px', right: '20px', background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
-        >
-          <X size={26} />
+      <div className="glass-card" style={{ width: '520px', padding: '32px', position: 'relative' }}>
+        <button onClick={onClose} style={{ position: 'absolute', top: '20px', right: '20px', background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
+          <X size={20} />
         </button>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-          <Trophy size={32} className="gradient-text-cyan" />
-          <div>
-            <h2 style={{ fontSize: '24px', fontWeight: '900', color: '#ffffff' }}>New Cricket Match Setup</h2>
-            <p style={{ fontSize: '13px', color: '#94a3b8', marginTop: '2px' }}>Configure teams, overs, toss, and opening players</p>
-          </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
+          <Trophy size={28} className="gradient-text" />
+          <h2 style={{ fontSize: '20px', fontWeight: '800' }}>New Cricket Match Setup</h2>
         </div>
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          
-          {/* Teams Section */}
-          <div className="mobile-stack" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <form onSubmit={handleSubmit}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
             <div>
-              <label style={{ fontSize: '15px', fontWeight: '800', color: '#00f2fe', display: 'block', marginBottom: '8px' }}>
-                Team 1 Name
-              </label>
-              <input
-                type="text"
-                value={team1}
-                onChange={(e) => setTeam1(e.target.value)}
-                className="glass-input-large"
-                placeholder="e.g. India"
-                required
-              />
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Team 1 Name</label>
+              <input type="text" value={team1} onChange={(e) => setTeam1(e.target.value)} className="glass-input" style={{ width: '100%' }} required />
             </div>
-
             <div>
-              <label style={{ fontSize: '15px', fontWeight: '800', color: '#00f2fe', display: 'block', marginBottom: '8px' }}>
-                Team 2 Name
-              </label>
-              <input
-                type="text"
-                value={team2}
-                onChange={(e) => setTeam2(e.target.value)}
-                className="glass-input-large"
-                placeholder="e.g. Australia"
-                required
-              />
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Team 2 Name</label>
+              <input type="text" value={team2} onChange={(e) => setTeam2(e.target.value)} className="glass-input" style={{ width: '100%' }} required />
             </div>
           </div>
 
-          {/* Match Settings Section */}
-          <div className="mobile-stack" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '14px', marginBottom: '20px' }}>
             <div>
-              <label style={{ fontSize: '15px', fontWeight: '800', color: '#ffab00', display: 'block', marginBottom: '8px' }}>
-                Total Overs
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="100"
-                placeholder="e.g. 20"
-                value={totalOvers}
-                onChange={(e) => setTotalOvers(e.target.value)}
-                className="glass-input-large"
-                required
-              />
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Total Overs</label>
+              <select value={totalOvers} onChange={(e) => setTotalOvers(e.target.value)} className="glass-input" style={{ width: '100%' }}>
+                <option value={5}>5 Overs</option>
+                <option value={10}>10 Overs</option>
+                <option value={20}>20 Overs (T20)</option>
+                <option value={50}>50 Overs (ODI)</option>
+              </select>
             </div>
-
             <div>
-              <label style={{ fontSize: '15px', fontWeight: '800', color: '#ffab00', display: 'block', marginBottom: '8px' }}>
-                Toss Winner
-              </label>
-              <select
-                value={tossWinner}
-                onChange={(e) => setTossWinner(e.target.value)}
-                className="glass-input-large"
-              >
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Toss Winner</label>
+              <select value={tossWinner} onChange={(e) => setTossWinner(e.target.value)} className="glass-input" style={{ width: '100%' }}>
                 <option value={team1}>{team1}</option>
                 <option value={team2}>{team2}</option>
               </select>
             </div>
-
             <div>
-              <label style={{ fontSize: '15px', fontWeight: '800', color: '#ffab00', display: 'block', marginBottom: '8px' }}>
-                Toss Choice
-              </label>
-              <select
-                value={tossDecision}
-                onChange={(e) => setTossDecision(e.target.value)}
-                className="glass-input-large"
-              >
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Toss Choice</label>
+              <select value={tossDecision} onChange={(e) => setTossDecision(e.target.value)} className="glass-input" style={{ width: '100%' }}>
                 <option value="BAT">Bat First</option>
                 <option value="BOWL">Bowl First</option>
               </select>
             </div>
           </div>
 
-          {/* Opening Players Section */}
-          <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '20px' }}>
-            <h4 style={{ fontSize: '18px', fontWeight: '900', color: '#00e676', marginBottom: '16px' }}>
-              Opening Players (Innings 1)
-            </h4>
-
-            <div className="mobile-stack" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '16px', marginBottom: '24px' }}>
+            <h4 style={{ fontSize: '14px', color: '#00f2fe', marginBottom: '14px' }}>Opening Players</h4>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
               <div>
-                <label style={{ fontSize: '15px', fontWeight: '800', color: '#ffffff', display: 'block', marginBottom: '8px' }}>
-                  Striker Batter
-                </label>
-                <input
-                  type="text"
-                  value={striker}
-                  onChange={(e) => setStriker(e.target.value)}
-                  className="glass-input-large"
-                  placeholder="Striker Batter Name"
-                  required
-                />
+                <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Striker Batter</label>
+                <input type="text" value={striker} onChange={(e) => setStriker(e.target.value)} className="glass-input" style={{ width: '100%' }} required />
               </div>
-
               <div>
-                <label style={{ fontSize: '15px', fontWeight: '800', color: '#ffffff', display: 'block', marginBottom: '8px' }}>
-                  Non-Striker Batter
-                </label>
-                <input
-                  type="text"
-                  value={nonStriker}
-                  onChange={(e) => setNonStriker(e.target.value)}
-                  className="glass-input-large"
-                  placeholder="Non-Striker Batter Name"
-                  required
-                />
+                <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Non-Striker Batter</label>
+                <input type="text" value={nonStriker} onChange={(e) => setNonStriker(e.target.value)} className="glass-input" style={{ width: '100%' }} required />
               </div>
             </div>
-
             <div>
-              <label style={{ fontSize: '15px', fontWeight: '800', color: '#ffffff', display: 'block', marginBottom: '8px' }}>
-                Opening Bowler Name
-              </label>
-              <input
-                type="text"
-                value={bowler}
-                onChange={(e) => setBowler(e.target.value)}
-                className="glass-input-large"
-                placeholder="Opening Bowler Name"
-                required
-              />
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px' }}>Opening Bowler Name</label>
+              <input type="text" value={bowler} onChange={(e) => setBowler(e.target.value)} className="glass-input" style={{ width: '100%' }} required />
             </div>
           </div>
 
           <button
             type="submit"
-            className="btn-action btn-gradient"
             style={{
               width: '100%',
-              padding: '18px',
-              borderRadius: '16px',
-              fontSize: '19px',
-              fontWeight: '900',
-              marginTop: '10px',
-              boxShadow: '0 0 30px rgba(0, 242, 254, 0.45)'
+              padding: '14px',
+              borderRadius: '12px',
+              border: 'none',
+              background: 'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)',
+              color: '#070a14',
+              fontWeight: '800',
+              fontSize: '15px',
+              cursor: 'pointer',
+              boxShadow: '0 0 20px rgba(0, 242, 254, 0.4)'
             }}
           >
-            Launch Match & Live Scoring ➔
+            Launch Match & Live Scoring
           </button>
         </form>
       </div>

@@ -40,3 +40,5 @@ ultralytics==8.4.103
 ultralytics-thop==2.0.20
 urllib3==2.7.0
 Werkzeug==3.1.8
+pymongo==4.17.0
+dnspython==2.8.0

@@ -47,7 +47,6 @@ export default function App() {
         setActiveTab={setActiveTab}
         liveCameraRunning={true}
         activeMatch={activeMatch}
-        onOpenMatchModal={() => setIsMatchModalOpen(true)}
       />
 
       <main style={{ flex: 1 }}>
@@ -70,7 +69,7 @@ export default function App() {
 
         {activeTab === 'analytics' && <AnalyticsDashboard />}
 
-        {(activeTab === 'history' || activeTab === 'matches') && <MatchSummaryView />}
+        {activeTab === 'matches' && <MatchSummaryView />}
       </main>
 
       <MatchSetupModal

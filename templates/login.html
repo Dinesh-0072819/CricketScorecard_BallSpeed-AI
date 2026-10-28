@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="login-container" style="display: flex; justify-content: center; align-items: center; min-height: 80vh;">
+    <div class="login-box" style="width: 100%; max-width: 400px; padding: 40px; border-radius: 16px; background: #1E293B; border: 1px solid #334155; box-shadow: 0 10px 30px rgba(0,0,0,0.35); text-align: center;">
+        <h1 style="color: #F8FAFC; margin-bottom: 25px;">Login</h1>
+        
+        <div id="login-error" style="color: #EF4444; font-size: 14px; margin-bottom: 15px; display: none; background: rgba(239, 68, 68, 0.1); padding: 10px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);"></div>
+        
+        <input type="text" id="username" placeholder="Username" style="width: 100%; padding: 14px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; font-size: 16px; box-sizing: border-box;" required>
+        
+        <input type="password" id="password" placeholder="Password" style="width: 100%; padding: 14px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; font-size: 16px; box-sizing: border-box;" required>
+        
+        <button onclick="handleLogin()" style="width: 100%; padding: 14px; border: none; border-radius: 8px; background: #38BDF8; color: white; font-weight: bold; font-size: 16px; cursor: pointer; margin-bottom: 15px; transition: background 0.2s;">
+            LOGIN
+        </button>
+        
+        <button onclick="handleGuest()" style="width: 100%; padding: 14px; border: 1px solid #38BDF8; border-radius: 8px; background: transparent; color: #38BDF8; font-weight: bold; font-size: 16px; cursor: pointer; transition: background 0.2s;">
+            LOGIN AS GUEST
+        </button>
+    </div>
+</div>
+
+<script>
+function handleLogin() {
+    const user = document.getElementById('username').value.trim();
+    const pass = document.getElementById('password').value;
+    const errorEl = document.getElementById('login-error');
+    
+    if (user === '' || pass === '') {
+        errorEl.textContent = "⚠️ Please fill in all fields.";
+        errorEl.style.display = 'block';
+        return;
+    }
+    
+    // Simple mock authentication (admin/admin)
+    if (user === 'admin' && pass === 'admin') {
+        localStorage.setItem('userRole', 'admin');
+        window.location.href = "/dashboard";
+    } else {
+        errorEl.textContent = "❌ Invalid username or password (Use admin/admin).";
+        errorEl.style.display = 'block';
+    }
+}
+
+function handleGuest() {
+    localStorage.setItem('userRole', 'guest');
+    window.location.href = "/dashboard";
+}
+</script>
+{% endblock %}

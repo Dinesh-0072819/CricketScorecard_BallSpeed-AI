@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<h1 class="page-title">
+    Upload Bowling Video
+</h1>
+
+<div class="upload-container">
+
+    <div class="upload-card">
+
+        <h2>🏏 Bowling Speed Analyzer</h2>
+
+        <p class="upload-text">
+            Select a bowling video to calculate bowling speed using AI.
+        </p>
+
+        <form action="/upload" method="POST" enctype="multipart/form-data">
+
+
+
+            <label class="upload-label">
+                Choose Video
+            </label>
+
+            <input
+                type="file"
+                name="video"
+                accept="video/mp4,video/mov,video/avi"
+                required
+            >
+
+            <br><br>
+
+            <label class="upload-label">
+                Maximum Allowed Speed (km/h)
+            </label>
+
+            <input
+                type="number"
+                name="max_speed"
+                value="70"
+                min="10"
+                max="200"
+                required
+            >
+
+            <br><br>
+
+            <button class="start-btn" type="submit">
+                ▶ Analyze Video
+            </button>
+
+        </form>
+
+    </div>
+
+    <div class="upload-status">
+
+        <h2>Current Workflow</h2>
+
+        <div class="workflow">
+
+            <p>📁 Upload Bowling Video</p>
+
+            <p>⬇</p>
+
+            <p>🎯 YOLO Ball Detection</p>
+
+            <p>⬇</p>
+
+            <p>📍 Ball Tracking</p>
+
+            <p>⬇</p>
+
+            <p>⚡ Bowling Speed Calculation</p>
+
+            <p>⬇</p>
+
+            <p>🚨 Speed Limit Check</p>
+
+            <p>⬇</p>
+
+            <p>📊 Generate Report</p>
+
+        </div>
+
+    </div>
+
+</div>
+
+{% endblock %}

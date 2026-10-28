@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="page-title">⚡ Speed Limit Settings</h1>
+
+<div style="display: flex; justify-content: center; align-items: center; min-height: 50vh;">
+    <!-- Speed Limit Configuration Card -->
+    <div class="upload-card" style="width: 100%; max-width: 450px; padding: 30px; border-radius: 16px; background: #1E293B; border: 1px solid #334155; box-shadow: 0 10px 30px rgba(0,0,0,0.35);">
+        <h2>⚙️ System Config</h2>
+        <p class="upload-text" style="color: #94A3B8; margin-bottom: 25px;">Set global thresholds and speed limits for monitoring alerts.</p>
+        
+        <form id="config-form" style="text-align: left;">
+            <label class="upload-label" style="font-weight: 600; color: #F8FAFC;">Max Speed Threshold (km/h)</label>
+            <input type="number" id="max_speed_limit" value="70" min="10" max="200" required style="width: 100%; padding: 12px; margin-top: 10px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white;">
+            
+            <button class="start-btn" type="submit" style="margin-top: 30px; width: 100%; padding: 12px; font-weight: bold;">
+                Save Settings
+            </button>
+        </form>
+        <div id="config-message" style="margin-top: 15px; font-weight: 600; text-align: center;"></div>
+    </div>
+</div>
+
+<script>
+    // Config form submission
+    document.getElementById('config-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const maxLimit = document.getElementById('max_speed_limit').value;
+        const msgDiv = document.getElementById('config-message');
+
+        fetch('/save_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ max_speed: maxLimit })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                msgDiv.style.color = '#22C55E';
+                msgDiv.innerHTML = "✅ Settings saved successfully!";
+            } else {
+                msgDiv.style.color = '#EF4444';
+                msgDiv.innerHTML = "❌ Failed to save settings.";
+            }
+        })
+        .catch(err => {
+            msgDiv.style.color = '#EF4444';
+            msgDiv.innerHTML = "❌ Error: " + err;
+        });
+    });
+</script>
+{% endblock %}

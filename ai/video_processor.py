@@ -16,9 +16,6 @@ class VideoProcessor:
         self.model = YOLO("weights/tennis_ball_detector.pt")
 
         self.H = None
-        from ai.utils import CalibrationManager
-        self.calib_mgr = CalibrationManager()
-        _, _, self.H = self.calib_mgr.load_calibration()
         print("Model Loaded Successfully")
         print("=" * 50)
         print()
@@ -81,39 +78,29 @@ class VideoProcessor:
         input_video,
         output_video,
         max_speed=70,
-        batsman_hand="RIGHT",
-        calibration_profile=None,
         progress_callback=None
     ):
         from ai.tracker import ByteTracker
-        from ai.speed import SpeedEstimator, pixel_to_ground
+        from ai.speed import SpeedEstimator
         from ai.alarm import AlarmSystem
-        from ai.track_cleaning import clean_track
-        from ai.delivery_analysis import analyze_delivery
-        from ai.overlay_hud import draw_live_trail, draw_post_delivery_hud
-        from config import ENABLE_BALL_ANALYSIS, LOST_FRAMES_N, MIN_TRACK_POINTS, OVERLAY_HOLD_SECONDS
 
         cap = cv2.VideoCapture(input_video)
 
         if not cap.isOpened():
             print("ERROR : Cannot open video")
-            return {"speed": 0.0, "status": "ERROR", "delivery_analysis": None, "deliveries": [], "summary": {}}
+            return {"speed": 0.0, "status": "ERROR"}
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            total_frames = 1
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 1:
             fps = 30
 
         print(f"Video FPS : {fps} | Total Frames : {total_frames}")
-
-        active_H = self.H
-        if calibration_profile:
-            _, _, profile_H = self.calib_mgr.load_calibration(profile=calibration_profile)
-            if profile_H is not None:
-                active_H = profile_H
 
         temp_output = output_video.replace(".mp4", "_temp.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -127,7 +114,7 @@ class VideoProcessor:
 
         if not out.isOpened():
             cap.release()
-            return {"speed": 0.0, "status": "ERROR", "delivery_analysis": None, "deliveries": [], "summary": {}}
+            return {"speed": 0.0, "status": "ERROR"}
 
         # Initialize tracking, speed, and alarm modules
         tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
@@ -136,19 +123,9 @@ class VideoProcessor:
 
         detected_speed = 0.0
         maximum_speed = 0.0
-        delivery_max_speed = 0.0
         status = "SAFE"
         frame_number = 0
-
-        # Trajectory buffer and delivery tracking state
-        trajectory_buffer = []
-        consecutive_tracked = 0
-        lost_frames = 0
-        delivery_active = False
-        last_delivery_analysis = None
-        last_delivery_points = []
-        last_delivery_frame = -999999
-        deliveries_analyzed = []
+        trajectory_points = []
 
         while True:
             ret, frame = cap.read()
@@ -156,6 +133,11 @@ class VideoProcessor:
                 break
 
             frame_number += 1
+
+            if progress_callback and (frame_number % 2 == 0 or frame_number == total_frames):
+                pct = min(92, max(1, int((frame_number / total_frames) * 92)))
+                progress_callback(pct, frame_number, total_frames, f"AI Tracking Delivery: Frame {frame_number} of {total_frames} ({pct}%)")
+
             annotated = frame.copy()
 
             # ---------------- YOLO BALL DETECTION ----------------
@@ -196,6 +178,7 @@ class VideoProcessor:
                 
                 current_center = (int(smoothed_center[0]), int(smoothed_center[1]))
                 ball_found = True
+                trajectory_points.append(current_center)
 
                 # Draw tracking target
                 cv2.circle(annotated, current_center, 8, (0, 255, 0), 2)
@@ -240,74 +223,14 @@ class VideoProcessor:
                     f"Smoothed Speed {detected_speed:.1f} km/h"
                 )
 
-            # ---------------- TRAJECTORY BUFFERING & DELIVERY ANALYSIS ----------------
-            if ball_found and current_center is not None:
-                gx, gy = pixel_to_ground(current_center[0], current_center[1], H=active_H, frame_width=width, frame_height=height)
-                t_sec = float(frame_number) / float(fps)
-                point_data = {
-                    "x": gx,
-                    "y": gy,
-                    "px": float(current_center[0]),
-                    "py": float(current_center[1]),
-                    "t": t_sec
-                }
-                consecutive_tracked += 1
-                lost_frames = 0
-                if not delivery_active and consecutive_tracked >= 3:
-                    delivery_active = True
-                    delivery_max_speed = detected_speed
-                if delivery_active:
-                    trajectory_buffer.append(point_data)
-                    if detected_speed > delivery_max_speed:
-                        delivery_max_speed = detected_speed
-            else:
-                consecutive_tracked = 0
-                if delivery_active:
-                    lost_frames += 1
-
-            # Check delivery completion trigger
-            if delivery_active:
-                passed_crease = (len(trajectory_buffer) > 0 and trajectory_buffer[-1]["y"] >= 19.0)
-                lost_too_long = (lost_frames >= LOST_FRAMES_N)
-                if passed_crease or lost_too_long:
-                    delivery_active = False
-                    if ENABLE_BALL_ANALYSIS and len(trajectory_buffer) >= MIN_TRACK_POINTS:
-                        cleaned = clean_track(trajectory_buffer)
-                        if cleaned:
-                            try:
-                                d_speed = delivery_max_speed if delivery_max_speed > 0 else (detected_speed if detected_speed > 0 else maximum_speed)
-                                analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=d_speed)
-                                last_delivery_analysis = analysis
-                                last_delivery_points = list(cleaned)
-                                last_delivery_frame = frame_number
-
-                                # Determine bounce pixel position
-                                bounce_px = None
-                                if analysis.get("bounce_xy_m"):
-                                    bx, by = analysis["bounce_xy_m"]
-                                    closest_pt = min(cleaned, key=lambda pt: abs(pt["y"] - by))
-                                    bounce_px = [round(closest_pt["px"], 1), round(closest_pt["py"], 1)]
-
-                                start_t = trajectory_buffer[0]["t"]
-                                end_t = trajectory_buffer[-1]["t"]
-                                delivery_record = {
-                                    "index": len(deliveries_analyzed) + 1,
-                                    "start_time_s": round(start_t, 2),
-                                    "end_time_s": round(end_t, 2),
-                                    "speed_kmh": round(d_speed, 1),
-                                    "analysis": analysis,
-                                    "bounce_px": bounce_px
-                                }
-                                deliveries_analyzed.append(delivery_record)
-                            except Exception as err:
-                                print(f"Delivery analysis error: {err}")
-                    trajectory_buffer = []
-                    lost_frames = 0
-                    delivery_max_speed = 0.0
-
-            # ---------------- BALL TRAIL DRAWING (Fading Cyan #00f2fe) ----------------
+            # ---------------- BALL TRAIL DRAWING ----------------
             if ball_found and len(primary_track.smoothed_history) > 1:
-                draw_live_trail(annotated, primary_track.smoothed_history, current_center)
+                trail = primary_track.smoothed_history[-25:]
+                for i in range(1, len(trail)):
+                    thickness = max(1, int(i / 4))
+                    pt1 = (int(trail[i-1][0]), int(trail[i-1][1]))
+                    pt2 = (int(trail[i][0]), int(trail[i][1]))
+                    cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
 
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
@@ -346,31 +269,10 @@ class VideoProcessor:
             detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
             cv2.putText(annotated, detect_text, (x1 + 15, y1 + 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, detect_color, 1)
 
-            # ---------------- POST-DELIVERY HUD OVERLAY ----------------
-            if last_delivery_analysis and (frame_number - last_delivery_frame) / fps <= OVERLAY_HOLD_SECONDS:
-                try:
-                    overlay_age = (frame_number - last_delivery_frame) / fps
-                    draw_post_delivery_hud(
-                        annotated,
-                        last_delivery_analysis,
-                        overlay_age=overlay_age,
-                        speed_kmh=maximum_speed,
-                        trajectory_points=last_delivery_points
-                    )
-                except Exception as hud_err:
-                    print(f"Error drawing HUD: {hud_err}")
-
             out.write(annotated)
-
-            if progress_callback and total_frames > 0 and frame_number % 5 == 0:
-                pct = int((frame_number / total_frames) * 85)
-                progress_callback(pct)
 
         cap.release()
         out.release()
-
-        if progress_callback:
-            progress_callback(90)
 
         print()
         print("=" * 50)
@@ -378,6 +280,9 @@ class VideoProcessor:
         print("=" * 50)
         print("Encoding Output Video...")
         print()
+
+        if progress_callback:
+            progress_callback(94, frame_number, total_frames, "Encoding output video overlay...")
 
         # Apple hardware H264 encoder
         command = [
@@ -418,55 +323,14 @@ class VideoProcessor:
         if os.path.exists(temp_output):
             os.remove(temp_output)
 
-        # Final check if an active delivery completed at video end
-        if delivery_active and ENABLE_BALL_ANALYSIS and len(trajectory_buffer) >= MIN_TRACK_POINTS:
-            cleaned = clean_track(trajectory_buffer)
-            if cleaned:
-                try:
-                    d_speed = delivery_max_speed if delivery_max_speed > 0 else (detected_speed if detected_speed > 0 else maximum_speed)
-                    analysis = analyze_delivery(cleaned, batsman_hand=batsman_hand, speed_kmh=d_speed)
-                    last_delivery_analysis = analysis
-
-                    bounce_px = None
-                    if analysis.get("bounce_xy_m"):
-                        bx, by = analysis["bounce_xy_m"]
-                        closest_pt = min(cleaned, key=lambda pt: abs(pt["y"] - by))
-                        bounce_px = [round(closest_pt["px"], 1), round(closest_pt["py"], 1)]
-
-                    start_t = trajectory_buffer[0]["t"]
-                    end_t = trajectory_buffer[-1]["t"]
-                    delivery_record = {
-                        "index": len(deliveries_analyzed) + 1,
-                        "start_time_s": round(start_t, 2),
-                        "end_time_s": round(end_t, 2),
-                        "speed_kmh": round(d_speed, 1),
-                        "analysis": analysis,
-                        "bounce_px": bounce_px
-                    }
-                    deliveries_analyzed.append(delivery_record)
-                except Exception as err:
-                    print(f"Final delivery analysis error: {err}")
-
-        # Compute summary metrics across all analyzed deliveries
-        total_delivs = len(deliveries_analyzed)
-        avg_speed = round(sum(d["speed_kmh"] for d in deliveries_analyzed) / total_delivs, 1) if total_delivs > 0 else round(maximum_speed, 1)
-        spin_count = sum(1 for d in deliveries_analyzed if d.get("analysis", {}).get("spin_type") in ("OFF_SPIN", "LEG_SPIN"))
-        swing_count = sum(1 for d in deliveries_analyzed if d.get("analysis", {}).get("swing_type") in ("INSWING", "OUTSWING"))
-        length_dist = {"Yorker": 0, "Full": 0, "Good Length": 0, "Short": 0}
-        for d in deliveries_analyzed:
-            l = d.get("analysis", {}).get("length")
-            if l in length_dist:
-                length_dist[l] += 1
-            elif l:
-                length_dist[l] = length_dist.get(l, 0) + 1
-
-        summary = {
-            "total_deliveries": total_delivs,
-            "avg_speed": avg_speed,
-            "spin_count": spin_count,
-            "swing_count": swing_count,
-            "length_distribution": length_dist
-        }
+        # Analyze complete delivery trajectory for Angle of Deviation, Swing, and Turn
+        from ai.delivery_analysis import analyze_delivery
+        analysis = analyze_delivery(
+            trajectory_points,
+            fps=fps,
+            pixel_to_meter=0.025,
+            speed_kmh=maximum_speed
+        )
 
         print()
         print("=" * 50)
@@ -476,10 +340,13 @@ class VideoProcessor:
         print(f"Frames Processed : {frame_number}")
         print(f"FPS              : {fps:.2f}")
         print(f"Maximum Speed    : {maximum_speed:.1f} km/h")
+        print(f"Dev Angle (Turn) : {analysis['deviation_angle_deg']} deg")
+        print(f"Air Swing        : {analysis['swing_cm']} cm")
+        print(f"Turn Direction   : {analysis['turn_direction']}")
+        print(f"Delivery Type    : {analysis['delivery_type']}")
         print(f"Speed Limit      : {max_speed:.1f} km/h")
         print(f"Status           : {status}")
         print(f"Output Video     : {output_video}")
-        print(f"Deliveries Found : {total_delivs}")
 
         if self.H is not None:
             print("Distance Mode    : Perspective calibrated")
@@ -490,10 +357,16 @@ class VideoProcessor:
         print("Completed Successfully")
         print()
 
+        if progress_callback:
+            progress_callback(100, frame_number, total_frames, "Delivery analysis complete!")
+
         return {
             "speed": round(maximum_speed, 1),
             "status": status,
-            "delivery_analysis": last_delivery_analysis,
-            "deliveries": deliveries_analyzed,
-            "summary": summary
+            "deviation_angle": analysis["deviation_angle_deg"],
+            "turn_angle": analysis["turn_angle_deg"],
+            "turn_direction": analysis["turn_direction"],
+            "swing_cm": analysis["swing_cm"],
+            "delivery_type": analysis["delivery_type"],
+            "analysis": analysis
         }
