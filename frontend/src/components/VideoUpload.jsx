@@ -63,7 +63,10 @@ export default function VideoUpload() {
       setProcessingProgress(0);
       setStatusDetails('Initializing AI model & reading video frames...');
 
+      let isFetching = false;
       pollIntervalRef.current = setInterval(async () => {
+        if (isFetching) return;
+        isFetching = true;
         try {
           const res = await fetch('/upload_progress');
           const data = await res.json();
@@ -75,8 +78,10 @@ export default function VideoUpload() {
           }
         } catch (err) {
           console.error('Error polling processing progress:', err);
+        } finally {
+          isFetching = false;
         }
-      }, 250);
+      }, 1000);
     };
 
     // Track live upload progress percentage

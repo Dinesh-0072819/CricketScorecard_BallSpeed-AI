@@ -330,8 +330,8 @@ class VideoProcessor:
                 "-y",
                 "-i", temp_output,
                 "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "22",
+                "-preset", "ultrafast",
+                "-crf", "26",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
                 "-an",
@@ -347,14 +347,14 @@ class VideoProcessor:
 
             # Fallback encoder if primary failed
             if result.returncode != 0:
-                print("Primary encoder failed. Switching to libx264 fallback...")
+                print("Primary encoder failed. Switching to ultrafast libx264 fallback...")
                 fallback_cmd = [
                     "ffmpeg",
                     "-y",
                     "-i", temp_output,
                     "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "22",
+                    "-preset", "ultrafast",
+                    "-crf", "26",
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                     "-an",
