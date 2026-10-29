@@ -401,31 +401,56 @@ def upload_video():
                 })
 
             try:
-                result = video_processor.process(
-                    input_video=input_path,
-                    output_video=output_path,
-                    max_speed=max_speed,
-                    progress_callback=on_processing_progress
-                )
+                hf_url = os.getenv("HF_AI_URL", "").rstrip("/")
+                if hf_url:
+                    write_progress({
+                        "status": "processing",
+                        "percent": 45,
+                        "frame": 0,
+                        "total_frames": 0,
+                        "message": "Analyzing delivery on high-speed AI cloud..."
+                    })
+                    import requests as _requests
+                    with open(input_path, "rb") as vf:
+                        hf_resp = _requests.post(
+                            f"{hf_url}/analyze",
+                            files={"video": (os.path.basename(input_path), vf, "video/mp4")},
+                            data={"max_speed": max_speed},
+                            timeout=60
+                        )
+                    if hf_resp.status_code == 200:
+                        final_data = hf_resp.json()
+                        result = {
+                            "speed": final_data.get("detected_speed", 0.0),
+                            "status": final_data.get("ball_status", "SAFE")
+                        }
+                    else:
+                        raise RuntimeError(f"AI cloud error: {hf_resp.text}")
+                else:
+                    result = video_processor.process(
+                        input_video=input_path,
+                        output_video=output_path,
+                        max_speed=max_speed,
+                        progress_callback=on_processing_progress
+                    )
+                    final_data = {
+                        "status": "success",
+                        "video_url": f"/uploads/{output_filename}",
+                        "detected_speed": float(result["speed"]),
+                        "max_speed": max_speed,
+                        "ball_status": result["status"],
+                        "deviation_angle": float(result.get("deviation_angle", 0.0)),
+                        "turn_angle": float(result.get("turn_angle", 0.0)),
+                        "turn_direction": result.get("turn_direction", "Straight"),
+                        "swing_cm": float(result.get("swing_cm", 0.0)),
+                        "delivery_type": result.get("delivery_type", "STRAIGHT")
+                    }
 
                 # Save tracking record to database
                 add_run(
                     speed=result["speed"],
                     status=result["status"]
                 )
-
-                final_data = {
-                    "status": "success",
-                    "video_url": f"/uploads/{output_filename}",
-                    "detected_speed": float(result["speed"]),
-                    "max_speed": max_speed,
-                    "ball_status": result["status"],
-                    "deviation_angle": float(result.get("deviation_angle", 0.0)),
-                    "turn_angle": float(result.get("turn_angle", 0.0)),
-                    "turn_direction": result.get("turn_direction", "Straight"),
-                    "swing_cm": float(result.get("swing_cm", 0.0)),
-                    "delivery_type": result.get("delivery_type", "STRAIGHT")
-                }
 
                 write_progress({
                     "status": "done",
