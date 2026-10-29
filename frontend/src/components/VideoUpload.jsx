@@ -14,6 +14,15 @@ export default function VideoUpload() {
   const [isMuted, setIsMuted] = useState(false);
 
   const pollIntervalRef = useRef(null);
+  const videoRef = useRef(null);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+
+  const changePlaybackSpeed = (speed) => {
+    setPlaybackSpeed(speed);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = speed;
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -508,9 +517,50 @@ export default function VideoUpload() {
               </div>
             </div>
 
-            {/* Video Player Display */}
+            {/* Video Player Display with Slow-Mo Controls */}
             <div style={{ borderRadius: '16px', overflow: 'hidden', border: isNoBall ? '2px solid #ff1744' : '1px solid rgba(255,255,255,0.15)' }}>
-              <video controls src={result.video_url} style={{ width: '100%', maxHeight: '520px', background: '#000' }} />
+              <video
+                ref={videoRef}
+                controls
+                src={result.video_url}
+                style={{ width: '100%', maxHeight: '520px', background: '#000', display: 'block' }}
+                onPlay={() => {
+                  if (videoRef.current) videoRef.current.playbackRate = playbackSpeed;
+                }}
+              />
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 16px',
+                background: 'rgba(10, 15, 30, 0.9)',
+                borderTop: '1px solid rgba(255, 255, 255, 0.1)'
+              }}>
+                <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: '700' }}>
+                  ⚡ Playback Speed:
+                </span>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {[0.25, 0.5, 0.75, 1.0].map((rate) => (
+                    <button
+                      key={rate}
+                      type="button"
+                      onClick={() => changePlaybackSpeed(rate)}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: '6px',
+                        fontSize: '11px',
+                        fontWeight: '800',
+                        border: playbackSpeed === rate ? '1px solid #00f2fe' : '1px solid rgba(255, 255, 255, 0.1)',
+                        background: playbackSpeed === rate ? 'rgba(0, 242, 254, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                        color: playbackSpeed === rate ? '#00f2fe' : '#94a3b8',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {rate === 1.0 ? '1.0x (Normal)' : `${rate}x Slow-Mo`}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         )}

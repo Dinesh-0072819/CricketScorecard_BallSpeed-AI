@@ -31,17 +31,15 @@ class SpeedEstimator:
 
     def calculate_speed(self, p1, p2, H=None):
         """
-        Calculates instantaneous speed in km/h between two points.
-        p1, p2: (x, y) tuples representing consecutive positions.
-        Strict rule: calculate only ball towards camera (dy > 0), not away (dy <= 0).
+        Calculates instantaneous speed in km/h between two consecutive tracking coordinates.
+        Uses full 2D displacement (dx, dy) supporting all camera angles:
+        - Bowler's end (towards batsman / camera)
+        - Batsman's end (towards bowler / away from camera)
+        - Side-on / square-pitch angles
         """
+        dx = p2[0] - p1[0]
         dy = p2[1] - p1[1]
 
-        # Only calculate ball towards camera (dy > 0), not away from camera (dy <= 0)
-        if dy <= 0:
-            return 0.0, 0.0
-
-        dx = p2[0] - p1[0]
         pixel_distance = math.sqrt(dx * dx + dy * dy)
         if pixel_distance < 1.0:
             return 0.0, 0.0
