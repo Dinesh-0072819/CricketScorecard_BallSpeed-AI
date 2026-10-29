@@ -684,17 +684,21 @@ def api_clear_matches():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_spa(path):
-    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+    if app.static_folder and os.path.exists(os.path.join(app.static_folder, path)) and path != "":
         return send_from_directory(app.static_folder, path)
-    return send_from_directory(app.static_folder, 'index.html')
+    if app.static_folder and os.path.exists(os.path.join(app.static_folder, 'index.html')):
+        return send_from_directory(app.static_folder, 'index.html')
+    return "CricSpeed AI is running.", 200
 
 # ----------------------------------
 # Run
 # ----------------------------------
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5050))
+    debug_mode = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1")
     app.run(
         host="0.0.0.0",
-        port=5050,
-        debug=True
+        port=port,
+        debug=debug_mode
     )

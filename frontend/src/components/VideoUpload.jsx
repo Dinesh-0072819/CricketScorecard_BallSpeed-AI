@@ -1,16 +1,27 @@
-import React, { useState } from 'react';
-import { UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, Volume2, VolumeX, Zap, Loader2, Sparkles, Activity } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, Volume2, VolumeX, Zap, Loader2, Sparkles, Activity, Cpu } from 'lucide-react';
 
 export default function VideoUpload() {
   const [file, setFile] = useState(null);
   const [maxSpeedLimit, setMaxSpeedLimit] = useState(70.0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [processingProgress, setProcessingProgress] = useState(0);
   const [uploadPhase, setUploadPhase] = useState('idle'); // 'idle' | 'uploading' | 'processing' | 'done' | 'error'
-  const [uploadDetails, setUploadDetails] = useState('');
+  const [statusDetails, setStatusDetails] = useState('');
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [isMuted, setIsMuted] = useState(false);
+
+  const pollIntervalRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
+  }, []);
 
   const playNoBallAudio = () => {
     if (isMuted) return;
@@ -26,10 +37,16 @@ export default function VideoUpload() {
     e.preventDefault();
     if (!file) return;
 
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
     setIsProcessing(true);
     setUploadProgress(0);
+    setProcessingProgress(0);
     setUploadPhase('uploading');
-    setUploadDetails('Starting video transfer...');
+    setStatusDetails('Starting video transfer...');
     setError('');
     setResult(null);
 
@@ -40,25 +57,52 @@ export default function VideoUpload() {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/upload', true);
 
-    // Track upload progress percentage
+    const startProcessingPoll = () => {
+      if (pollIntervalRef.current) return;
+      setUploadPhase('processing');
+      setProcessingProgress(0);
+      setStatusDetails('Initializing AI model & reading video frames...');
+
+      pollIntervalRef.current = setInterval(async () => {
+        try {
+          const res = await fetch('/upload_progress');
+          const data = await res.json();
+          if (data && data.status === 'processing') {
+            setProcessingProgress(data.percent || 0);
+            if (data.message) {
+              setStatusDetails(data.message);
+            }
+          }
+        } catch (err) {
+          console.error('Error polling processing progress:', err);
+        }
+      }, 250);
+    };
+
+    // Track live upload progress percentage
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         const percent = Math.round((event.loaded / event.total) * 100);
         setUploadProgress(percent);
         const loadedMB = (event.loaded / (1024 * 1024)).toFixed(1);
         const totalMB = (event.total / (1024 * 1024)).toFixed(1);
-        
+
         if (percent < 100) {
-          setUploadDetails(`Uploading video: ${loadedMB} MB / ${totalMB} MB (${percent}%)`);
+          setStatusDetails(`Uploading video payload: ${loadedMB} MB / ${totalMB} MB (${percent}%)`);
         } else {
-          setUploadPhase('processing');
-          setUploadDetails('Upload complete! Running YOLOv8 ball tracking & velocity radar...');
+          startProcessingPoll();
         }
       }
     };
 
     xhr.onload = () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
       setIsProcessing(false);
+      setProcessingProgress(100);
+
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const data = JSON.parse(xhr.responseText);
@@ -83,6 +127,10 @@ export default function VideoUpload() {
     };
 
     xhr.onerror = () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
       setIsProcessing(false);
       setUploadPhase('error');
       setError('Network connection error occurred during upload.');
@@ -101,7 +149,7 @@ export default function VideoUpload() {
             <UploadCloud size={32} className="gradient-text-cyan" />
             <div>
               <h2 style={{ fontSize: '20px', fontWeight: '900' }}>AI Bowling Delivery Video Analyzer</h2>
-              <p style={{ fontSize: '13px', color: '#94a3b8' }}>Upload match bowling footage for frame-by-frame velocity & no-ball analysis</p>
+              <p style={{ fontSize: '13px', color: '#94a3b8' }}>Upload match bowling footage for real-time tracking, velocity radar & no-ball analysis</p>
             </div>
           </div>
 
@@ -138,6 +186,7 @@ export default function VideoUpload() {
               onChange={(e) => {
                 setFile(e.target.files[0]);
                 setUploadProgress(0);
+                setProcessingProgress(0);
                 setUploadPhase('idle');
                 setResult(null);
                 setError('');
@@ -194,7 +243,9 @@ export default function VideoUpload() {
               {isProcessing ? (
                 <>
                   <Loader2 size={18} className="spin-animation" />
-                  {uploadPhase === 'uploading' ? `Uploading (${uploadProgress}%)` : 'AI Processing Delivery...'}
+                  {uploadPhase === 'uploading' 
+                    ? `Uploading (${uploadProgress}%)` 
+                    : `Processing (${processingProgress}%)`}
                 </>
               ) : (
                 'Analyze Video Trajectory'
@@ -203,41 +254,49 @@ export default function VideoUpload() {
           </div>
         </form>
 
-        {/* Upload Progress & Processing Status Card */}
+        {/* Live Upload & Processing Progress Cards */}
         {isProcessing && (
           <div style={{
             background: 'rgba(8, 14, 28, 0.85)',
-            border: '1px solid rgba(0, 242, 254, 0.35)',
+            border: uploadPhase === 'uploading' ? '1px solid rgba(0, 242, 254, 0.35)' : '1px solid rgba(0, 230, 118, 0.4)',
             borderRadius: '16px',
             padding: '24px',
             marginBottom: '24px',
-            boxShadow: '0 0 25px rgba(0, 242, 254, 0.15)'
+            boxShadow: uploadPhase === 'uploading' ? '0 0 25px rgba(0, 242, 254, 0.15)' : '0 0 25px rgba(0, 230, 118, 0.15)'
           }}>
+            {/* Header with Title and Current Percentage */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 {uploadPhase === 'uploading' ? (
-                  <UploadCloud size={20} color="#00f2fe" className="live-dot" />
+                  <UploadCloud size={22} color="#00f2fe" className="live-dot" />
                 ) : (
-                  <Activity size={20} color="#00e676" className="live-dot" />
+                  <Cpu size={22} color="#00e676" className="live-dot" />
                 )}
-                <span style={{ fontSize: '14px', fontWeight: '800', color: '#f8fafc' }}>
-                  {uploadPhase === 'uploading' ? 'Uploading Video Footage' : 'AI Ball Tracking & Radar Processing'}
+                <div>
+                  <div style={{ fontSize: '15px', fontWeight: '800', color: '#f8fafc' }}>
+                    {uploadPhase === 'uploading' ? 'Uploading Delivery Video Footage' : 'AI Ball Tracking & Velocity Radar Processing'}
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                    {uploadPhase === 'uploading' ? 'Transferring video file to server' : 'Running YOLOv8, ByteTrack & Movement Analytics'}
+                  </div>
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <span style={{
+                  fontSize: '20px',
+                  fontWeight: '900',
+                  color: uploadPhase === 'uploading' ? '#00f2fe' : '#00e676',
+                  fontFamily: 'var(--font-mono)'
+                }}>
+                  {uploadPhase === 'uploading' ? `${uploadProgress}%` : `${processingProgress}%`}
                 </span>
               </div>
-              <span style={{
-                fontSize: '14px',
-                fontWeight: '900',
-                color: uploadPhase === 'uploading' ? '#00f2fe' : '#00e676',
-                fontFamily: 'var(--font-mono)'
-              }}>
-                {uploadPhase === 'uploading' ? `${uploadProgress}%` : 'Processing...'}
-              </span>
             </div>
 
-            {/* Glowing Linear Progress Bar */}
+            {/* Glowing Linear Loading Progress Bar */}
             <div style={{
               width: '100%',
-              height: '10px',
+              height: '12px',
               borderRadius: '8px',
               background: 'rgba(255, 255, 255, 0.08)',
               overflow: 'hidden',
@@ -245,7 +304,7 @@ export default function VideoUpload() {
               position: 'relative'
             }}>
               <div style={{
-                width: uploadPhase === 'uploading' ? `${uploadProgress}%` : '100%',
+                width: uploadPhase === 'uploading' ? `${uploadProgress}%` : `${processingProgress}%`,
                 height: '100%',
                 borderRadius: '8px',
                 background: uploadPhase === 'uploading'
@@ -254,14 +313,18 @@ export default function VideoUpload() {
                 boxShadow: uploadPhase === 'uploading'
                   ? '0 0 15px rgba(0, 242, 254, 0.6)'
                   : '0 0 15px rgba(0, 230, 118, 0.6)',
-                transition: 'width 0.25s ease-out'
+                transition: 'width 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
               }} />
             </div>
 
+            {/* Status Footer Details */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', color: '#94a3b8' }}>
-              <span>{uploadDetails}</span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#00f2fe', fontWeight: '700' }}>
-                <Sparkles size={14} /> CricSpeed AI Engine Active
+              <span style={{ color: '#cbd5e1', fontWeight: '600' }}>
+                {statusDetails}
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px', color: uploadPhase === 'uploading' ? '#00f2fe' : '#00e676', fontWeight: '700' }}>
+                <Sparkles size={14} />
+                {uploadPhase === 'uploading' ? 'Stage 1 of 2: Upload' : 'Stage 2 of 2: AI Processing'}
               </span>
             </div>
           </div>

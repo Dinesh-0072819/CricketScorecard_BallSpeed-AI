@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: cricspeed-ai
+    runtime: python
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: ./render-build.sh
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 180
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PORT
+        value: 10000
+      - key: FLASK_DEBUG
+        value: "false"
+      - key: MONGO_URI
+        sync: false

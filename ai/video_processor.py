@@ -2,6 +2,8 @@ import cv2
 import subprocess
 import os
 import math
+import platform
+import shutil
 from ultralytics import YOLO
 
 
@@ -12,8 +14,16 @@ class VideoProcessor:
         print("Loading Tennis Ball AI Model...")
         print("=" * 50)
 
-        # Existing Antigravity-trained model
-        self.model = YOLO("weights/tennis_ball_detector.pt")
+        # Existing Antigravity-trained model or fallback
+        model_path = "weights/tennis_ball_detector.pt"
+        if not os.path.exists(model_path):
+            if os.path.exists("tennis_ball_detector.pt"):
+                model_path = "tennis_ball_detector.pt"
+            else:
+                print("Notice: weights/tennis_ball_detector.pt not found on server. Using yolov8n.pt fallback...")
+                model_path = "yolov8n.pt"
+
+        self.model = YOLO(model_path)
 
         self.H = None
         print("Model Loaded Successfully")
@@ -284,28 +294,20 @@ class VideoProcessor:
         if progress_callback:
             progress_callback(94, frame_number, total_frames, "Encoding output video overlay...")
 
-        # Apple hardware H264 encoder
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i", temp_output,
-            "-c:v", "h264_videotoolbox",
-            "-b:v", "8M",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-an",
-            output_video
-        ]
-
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-
-        # Fallback encoder
-        if result.returncode != 0:
-            print("VideoToolbox failed. Switching to libx264...")
+        # Select video encoder based on platform (Darwin / Linux)
+        if platform.system() == "Darwin":
+            command = [
+                "ffmpeg",
+                "-y",
+                "-i", temp_output,
+                "-c:v", "h264_videotoolbox",
+                "-b:v", "8M",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-an",
+                output_video
+            ]
+        else:
             command = [
                 "ffmpeg",
                 "-y",
@@ -318,10 +320,42 @@ class VideoProcessor:
                 "-an",
                 output_video
             ]
-            subprocess.run(command)
 
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            # Fallback encoder if primary failed
+            if result.returncode != 0:
+                print("Primary encoder failed. Switching to libx264 fallback...")
+                fallback_cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i", temp_output,
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "22",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    "-an",
+                    output_video
+                ]
+                subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except Exception as enc_err:
+            print(f"FFmpeg encoding note: {enc_err}")
+
+        # Ensure output video exists (fallback copy if ffmpeg not installed or errored)
+        if not os.path.exists(output_video) and os.path.exists(temp_output):
+            shutil.copy(temp_output, output_video)
+
+        if os.path.exists(temp_output) and os.path.exists(output_video):
+            try:
+                os.remove(temp_output)
+            except Exception:
+                pass
 
         # Analyze complete delivery trajectory for Angle of Deviation, Swing, and Turn
         from ai.delivery_analysis import analyze_delivery
