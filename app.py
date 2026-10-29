@@ -390,52 +390,75 @@ def upload_video():
             "message": "Initializing AI model & reading video frames..."
         })
 
-        def on_processing_progress(percent, frame, total_frames, message=""):
-            write_progress({
-                "status": "processing",
-                "percent": percent,
-                "frame": frame,
-                "total_frames": total_frames,
-                "message": message or f"AI Tracking Delivery: Frame {frame} of {total_frames} ({percent}%)"
-            })
+        def run_analysis_in_background():
+            def on_processing_progress(percent, frame, total_frames, message=""):
+                write_progress({
+                    "status": "processing",
+                    "percent": percent,
+                    "frame": frame,
+                    "total_frames": total_frames,
+                    "message": message or f"AI Tracking Delivery: Frame {frame} of {total_frames} ({percent}%)"
+                })
 
-        result = video_processor.process(
-            input_video=input_path,
-            output_video=output_path,
-            max_speed=max_speed,
-            progress_callback=on_processing_progress
-        )
+            try:
+                result = video_processor.process(
+                    input_video=input_path,
+                    output_video=output_path,
+                    max_speed=max_speed,
+                    progress_callback=on_processing_progress
+                )
 
-        write_progress({
-            "status": "done",
-            "percent": 100,
-            "frame": 0,
-            "total_frames": 0,
-            "message": "Delivery processing complete!"
-        })
+                # Save tracking record to database
+                add_run(
+                    speed=result["speed"],
+                    status=result["status"]
+                )
 
-        # Save tracking record to database
-        add_run(
-            speed=result["speed"],
-            status=result["status"]
-        )
+                final_data = {
+                    "status": "success",
+                    "video_url": f"/uploads/{output_filename}",
+                    "detected_speed": float(result["speed"]),
+                    "max_speed": max_speed,
+                    "ball_status": result["status"],
+                    "deviation_angle": float(result.get("deviation_angle", 0.0)),
+                    "turn_angle": float(result.get("turn_angle", 0.0)),
+                    "turn_direction": result.get("turn_direction", "Straight"),
+                    "swing_cm": float(result.get("swing_cm", 0.0)),
+                    "delivery_type": result.get("delivery_type", "STRAIGHT")
+                }
 
-        print("Video Processed Successfully")
+                write_progress({
+                    "status": "done",
+                    "percent": 100,
+                    "frame": 0,
+                    "total_frames": 0,
+                    "message": "Delivery processing complete!",
+                    "result": final_data
+                })
+                print("Background video processing completed successfully.")
+            except Exception as bg_err:
+                print(f"Background video processing error: {bg_err}")
+                write_progress({
+                    "status": "error",
+                    "percent": 0,
+                    "frame": 0,
+                    "total_frames": 0,
+                    "message": f"Processing error: {str(bg_err)}"
+                })
 
+        # Launch analysis in asynchronous daemon thread (prevents HTTP 504 timeout)
+        import threading
+        thread = threading.Thread(target=run_analysis_in_background, daemon=True)
+        thread.start()
+
+        # Respond immediately to client (< 1 second)
         return jsonify({
-            "status": "success",
-            "video_url": f"/uploads/{output_filename}",
-            "detected_speed": float(result["speed"]),
-            "max_speed": max_speed,
-            "ball_status": result["status"],
-            "deviation_angle": float(result.get("deviation_angle", 0.0)),
-            "turn_angle": float(result.get("turn_angle", 0.0)),
-            "turn_direction": result.get("turn_direction", "Straight"),
-            "swing_cm": float(result.get("swing_cm", 0.0)),
-            "delivery_type": result.get("delivery_type", "STRAIGHT")
-        })
+            "status": "accepted",
+            "message": "Video uploaded successfully. AI processing in progress."
+        }), 202
+
     except Exception as e:
-        print(f"Video processing error: {e}")
+        print(f"Video upload error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ----------------------------------

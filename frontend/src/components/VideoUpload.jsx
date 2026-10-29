@@ -77,6 +77,27 @@ export default function VideoUpload() {
             if (data.message) {
               setStatusDetails(data.message);
             }
+            if (data.status === 'done' && data.result) {
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              setIsProcessing(false);
+              setProcessingProgress(100);
+              setUploadPhase('done');
+              setResult(data.result);
+              if (data.result.ball_status === 'NO-BALL' || data.result.detected_speed > maxSpeedLimit) {
+                playNoBallAudio();
+              }
+            } else if (data.status === 'error') {
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              setIsProcessing(false);
+              setUploadPhase('error');
+              setError(data.message || 'AI processing encountered an error.');
+            }
           }
         } catch (err) {
           console.error('Error polling processing progress:', err);
@@ -103,31 +124,48 @@ export default function VideoUpload() {
     };
 
     xhr.onload = () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-      setIsProcessing(false);
-      setProcessingProgress(100);
-
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const data = JSON.parse(xhr.responseText);
-          if (data.status === 'success') {
+          if (data.status === 'accepted') {
+            // Upload complete! Let polling handle background AI execution
+            startProcessingPoll();
+          } else if (data.status === 'success') {
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
+            setIsProcessing(false);
+            setProcessingProgress(100);
             setUploadPhase('done');
             setResult(data);
             if (data.ball_status === 'NO-BALL' || data.detected_speed > maxSpeedLimit) {
               playNoBallAudio();
             }
           } else {
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
+            setIsProcessing(false);
             setUploadPhase('error');
             setError(data.message || 'Failed to analyze video delivery.');
           }
         } catch (err) {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+          setIsProcessing(false);
           setUploadPhase('error');
           setError('Invalid response received from server.');
         }
       } else {
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+        setIsProcessing(false);
         setUploadPhase('error');
         setError(`Server returned status error ${xhr.status}.`);
       }
