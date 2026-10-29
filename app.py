@@ -46,6 +46,14 @@ app.config["MAX_SPEED"] = 70.0
 camera = Camera()
 video_processor = VideoProcessor()
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "version": "2.1-fast",
+        "custom_weights": getattr(video_processor, "is_custom_model", False)
+    }), 200
+
 # Live Camera Tracking States
 live_tracker = None
 live_estimator = None
