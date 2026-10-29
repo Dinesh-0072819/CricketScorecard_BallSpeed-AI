@@ -157,7 +157,7 @@ class VideoProcessor:
         frame_number = 0
         raw_frame_number = 0
         last_ball_frame = 0
-        last_moving_frame = 0
+        slow_frames = 0
         trajectory_points = []
 
         while True:
@@ -260,9 +260,6 @@ class VideoProcessor:
                         instant_speed, pixel_dist, detected_speed
                     )
 
-                    if detected_speed > 30.0 or (detected_speed > 20.0 and pixel_dist > 15.0):
-                        last_moving_frame = raw_frame_number
-
                 print(
                     f"Frame {frame_number} | "
                     f"Tracked Ball {current_center} | "
@@ -282,14 +279,22 @@ class VideoProcessor:
                 maximum_speed = detected_speed
 
             # Early delivery completion:
-            # 1. If ball reached delivery speed and crossed pitch baseline near batsman (y > 80% frame height)
+            # 1. Ball reached batsman at baseline/bottom of pitch after bowling release
             if ball_found and maximum_speed > 30.0 and current_center[1] > int(height * 0.80) and len(trajectory_points) >= 8:
-                print(f"Ball crossed pitch baseline at frame {raw_frame_number} (y={current_center[1]}). Delivery complete!")
+                print(f"Delivery completed at frame {raw_frame_number}! Ball reached batsman crease (y={current_center[1]}).")
                 break
 
-            # 2. If ball reached peak speed and active motion ended (>20 raw frames since active motion)
-            if maximum_speed > 25.0 and len(trajectory_points) >= 10 and last_moving_frame > 0 and (raw_frame_number - last_moving_frame > 20):
-                print(f"Delivery completed at frame {raw_frame_number}. Concluding video analysis early.")
+            # 2. Ball reached bowling velocity and decelerated/stopped at batsman:
+            if maximum_speed > 25.0:
+                if detected_speed < maximum_speed * 0.50 or detected_speed == 0.0:
+                    slow_frames += 1
+                    if slow_frames >= 4:
+                        print(f"Delivery completed at frame {raw_frame_number}! Ball reached batsman and decelerated to {detected_speed:.1f} km/h.")
+                        break
+                else:
+                    slow_frames = 0
+            elif raw_frame_number - last_ball_frame > 30 and len(trajectory_points) >= 10:
+                print(f"Ball delivery track completed at frame {raw_frame_number}.")
                 break
 
             # ---------------- ALARM CONTROL ----------------

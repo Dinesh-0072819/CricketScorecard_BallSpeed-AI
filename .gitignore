@@ -24,6 +24,7 @@ CricSpeedAI.zip
 # Local database and uploaded videos
 database/scorecard.db
 uploads/
+Video_sam/
 
 # Large AI model files
 weights/*

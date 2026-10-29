@@ -9,12 +9,6 @@ echo "========================================="
 # 1. Upgrade pip
 python -m pip install --upgrade pip
 
-# Pull Git LFS model weights if git-lfs is installed
-if command -v git-lfs &> /dev/null; then
-    echo "Pulling Git LFS models..."
-    git lfs pull || true
-fi
-
 # 2. Install lightweight CPU PyTorch (crucial for Render free tier memory & disk limits)
 echo "Installing PyTorch CPU wheels..."
 pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
