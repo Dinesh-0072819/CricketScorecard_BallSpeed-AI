@@ -124,13 +124,21 @@ class VideoProcessor:
 
         print(f"Video FPS : {fps} | Total Frames : {total_frames}")
 
+        # Cloud optimization: Use stride=2 for 60FPS or long footage to cut CPU load by 50%
+        stride = 1
+        if fps >= 45 or total_frames > 150:
+            stride = 2
+
+        effective_fps = fps / stride
+        effective_total_frames = max(1, total_frames // stride)
+
         temp_output = output_video.replace(".mp4", "_temp.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
         out = cv2.VideoWriter(
             temp_output,
             fourcc,
-            fps,
+            effective_fps,
             (width, height)
         )
 
@@ -139,14 +147,16 @@ class VideoProcessor:
             return {"speed": 0.0, "status": "ERROR"}
 
         # Initialize tracking, speed, and alarm modules
-        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
-        estimator = SpeedEstimator(fps=fps, max_speed_limit=max_speed)
+        tracker = ByteTracker(dt=1.0/effective_fps, high_threshold=0.40, low_threshold=0.15)
+        estimator = SpeedEstimator(fps=effective_fps, max_speed_limit=max_speed)
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
         maximum_speed = 0.0
         status = "SAFE"
         frame_number = 0
+        raw_frame_number = 0
+        last_ball_frame = 0
         trajectory_points = []
 
         while True:
@@ -154,18 +164,22 @@ class VideoProcessor:
             if not ret:
                 break
 
+            raw_frame_number += 1
+            if stride > 1 and (raw_frame_number % stride != 0):
+                continue
+
             frame_number += 1
 
-            if progress_callback and (frame_number % 2 == 0 or frame_number == total_frames):
-                pct = min(92, max(1, int((frame_number / total_frames) * 92)))
-                progress_callback(pct, frame_number, total_frames, f"AI Tracking Delivery: Frame {frame_number} of {total_frames} ({pct}%)")
+            if progress_callback:
+                pct = min(92, max(1, int((frame_number / effective_total_frames) * 92)))
+                progress_callback(pct, frame_number, effective_total_frames, f"AI Tracking Delivery: Frame {frame_number} of {effective_total_frames} ({pct}%)")
 
             annotated = frame.copy()
 
             # ---------------- YOLO BALL DETECTION ----------------
             predict_kwargs = {
                 "source": frame,
-                "imgsz": 384,
+                "imgsz": 640,
                 "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
                 "iou": 0.40,
                 "verbose": False
@@ -205,6 +219,7 @@ class VideoProcessor:
                 
                 current_center = (int(smoothed_center[0]), int(smoothed_center[1]))
                 ball_found = True
+                last_ball_frame = raw_frame_number
                 trajectory_points.append(current_center)
 
                 # Draw tracking target
@@ -261,6 +276,11 @@ class VideoProcessor:
 
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
+
+            # Early delivery completion: If ball reached peak speed and completed flight across pitch, finish early!
+            if maximum_speed > 25.0 and len(trajectory_points) >= 12 and (raw_frame_number - last_ball_frame > 25):
+                print(f"Delivery completed at frame {raw_frame_number}. Concluding video analysis early.")
+                break
 
             # ---------------- ALARM CONTROL ----------------
             status, status_color = alarm.check(maximum_speed)
@@ -378,7 +398,7 @@ class VideoProcessor:
         from ai.delivery_analysis import analyze_delivery
         analysis = analyze_delivery(
             trajectory_points,
-            fps=fps,
+            fps=effective_fps,
             pixel_to_meter=0.025,
             speed_kmh=maximum_speed
         )

@@ -70,8 +70,10 @@ export default function VideoUpload() {
         try {
           const res = await fetch('/upload_progress');
           const data = await res.json();
-          if (data && data.status === 'processing') {
-            setProcessingProgress(data.percent || 0);
+          if (data) {
+            if (typeof data.percent === 'number' && data.percent > 0) {
+              setProcessingProgress(data.percent);
+            }
             if (data.message) {
               setStatusDetails(data.message);
             }
