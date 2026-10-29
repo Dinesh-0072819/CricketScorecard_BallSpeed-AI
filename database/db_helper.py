@@ -3,7 +3,13 @@ from pymongo import MongoClient
 from config import Config
 
 def get_db():
-    client = MongoClient(Config.MONGO_URI)
+    # Use 2-second timeout so it never hangs if MongoDB is offline or misconfigured
+    client = MongoClient(
+        Config.MONGO_URI,
+        serverSelectionTimeoutMS=2000,
+        connectTimeoutMS=2000,
+        socketTimeoutMS=2000
+    )
     return client[Config.MONGO_DB_NAME]
 
 def init_db():

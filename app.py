@@ -305,22 +305,38 @@ def camera_stats():
 # Upload Video & Progress Tracking
 # ----------------------------------
 
-upload_processing_state = {
-    "status": "idle",
-    "percent": 0,
-    "frame": 0,
-    "total_frames": 0,
-    "message": ""
-}
+PROGRESS_FILE = "/tmp/cricspeed_progress.json"
+
+def write_progress(state):
+    try:
+        with open(PROGRESS_FILE, "w") as f:
+            import json as _json
+            _json.dump(state, f)
+    except Exception:
+        pass
+
+def read_progress():
+    try:
+        if os.path.exists(PROGRESS_FILE):
+            with open(PROGRESS_FILE, "r") as f:
+                import json as _json
+                return _json.load(f)
+    except Exception:
+        pass
+    return {
+        "status": "idle",
+        "percent": 0,
+        "frame": 0,
+        "total_frames": 0,
+        "message": ""
+    }
 
 @app.route("/upload_progress", methods=["GET"])
 def get_upload_progress():
-    global upload_processing_state
-    return jsonify(upload_processing_state)
+    return jsonify(read_progress())
 
 @app.route("/upload", methods=["POST"])
 def upload_video():
-    global upload_processing_state
     try:
         # Clear previous uploads to save space
         if os.path.exists(app.config["UPLOAD_FOLDER"]):
@@ -355,25 +371,33 @@ def upload_video():
             output_filename
         )
 
-        upload_processing_state["status"] = "uploading"
-        upload_processing_state["percent"] = 0
-        upload_processing_state["frame"] = 0
-        upload_processing_state["total_frames"] = 0
-        upload_processing_state["message"] = "Saving uploaded video footage..."
+        write_progress({
+            "status": "uploading",
+            "percent": 0,
+            "frame": 0,
+            "total_frames": 0,
+            "message": "Saving uploaded video footage..."
+        })
 
         file.save(input_path)
         print(f"Video Saved : {input_path}")
 
-        upload_processing_state["status"] = "processing"
-        upload_processing_state["percent"] = 0
-        upload_processing_state["message"] = "Initializing AI model & reading video frames..."
+        write_progress({
+            "status": "processing",
+            "percent": 0,
+            "frame": 0,
+            "total_frames": 0,
+            "message": "Initializing AI model & reading video frames..."
+        })
 
         def on_processing_progress(percent, frame, total_frames, message=""):
-            upload_processing_state["status"] = "processing"
-            upload_processing_state["percent"] = percent
-            upload_processing_state["frame"] = frame
-            upload_processing_state["total_frames"] = total_frames
-            upload_processing_state["message"] = message or f"AI Tracking Delivery: Frame {frame} of {total_frames} ({percent}%)"
+            write_progress({
+                "status": "processing",
+                "percent": percent,
+                "frame": frame,
+                "total_frames": total_frames,
+                "message": message or f"AI Tracking Delivery: Frame {frame} of {total_frames} ({percent}%)"
+            })
 
         result = video_processor.process(
             input_video=input_path,
@@ -382,9 +406,13 @@ def upload_video():
             progress_callback=on_processing_progress
         )
 
-        upload_processing_state["status"] = "done"
-        upload_processing_state["percent"] = 100
-        upload_processing_state["message"] = "Delivery processing complete!"
+        write_progress({
+            "status": "done",
+            "percent": 100,
+            "frame": 0,
+            "total_frames": 0,
+            "message": "Delivery processing complete!"
+        })
 
         # Save tracking record to database
         add_run(
