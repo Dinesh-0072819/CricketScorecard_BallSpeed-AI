@@ -10,7 +10,7 @@ from ultralytics import YOLO
 
 # Limit PyTorch CPU threads to prevent thread thrashing & memory spikes on cloud instances
 try:
-    torch.set_num_threads(2)
+    torch.set_num_threads(1)
 except Exception:
     pass
 
@@ -157,6 +157,7 @@ class VideoProcessor:
         frame_number = 0
         raw_frame_number = 0
         last_ball_frame = 0
+        last_moving_frame = 0
         trajectory_points = []
 
         while True:
@@ -259,6 +260,9 @@ class VideoProcessor:
                         instant_speed, pixel_dist, detected_speed
                     )
 
+                    if detected_speed > 30.0 or (detected_speed > 20.0 and pixel_dist > 15.0):
+                        last_moving_frame = raw_frame_number
+
                 print(
                     f"Frame {frame_number} | "
                     f"Tracked Ball {current_center} | "
@@ -277,8 +281,14 @@ class VideoProcessor:
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
 
-            # Early delivery completion: If ball reached peak speed and completed flight across pitch, finish early!
-            if maximum_speed > 25.0 and len(trajectory_points) >= 12 and (raw_frame_number - last_ball_frame > 25):
+            # Early delivery completion:
+            # 1. If ball reached delivery speed and crossed pitch baseline near batsman (y > 80% frame height)
+            if ball_found and maximum_speed > 30.0 and current_center[1] > int(height * 0.80) and len(trajectory_points) >= 8:
+                print(f"Ball crossed pitch baseline at frame {raw_frame_number} (y={current_center[1]}). Delivery complete!")
+                break
+
+            # 2. If ball reached peak speed and active motion ended (>20 raw frames since active motion)
+            if maximum_speed > 25.0 and len(trajectory_points) >= 10 and last_moving_frame > 0 and (raw_frame_number - last_moving_frame > 20):
                 print(f"Delivery completed at frame {raw_frame_number}. Concluding video analysis early.")
                 break
 
