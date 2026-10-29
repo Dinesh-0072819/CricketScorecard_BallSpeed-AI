@@ -27,14 +27,14 @@ class VideoProcessor:
             try:
                 import onnxruntime as ort
                 so = ort.SessionOptions()
-                so.intra_op_num_threads = 1
-                so.inter_op_num_threads = 1
+                cpu_count = os.cpu_count() or 2
+                so.intra_op_num_threads = min(4, cpu_count)
                 so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 self.ort_session = ort.InferenceSession(onnx_path, sess_options=so, providers=["CPUExecutionProvider"])
                 self.ort_input_name = self.ort_session.get_inputs()[0].name
                 self.ort_output_name = self.ort_session.get_outputs()[0].name
                 self.use_onnx = True
-                print("Loaded ONNX Runtime Engine: Ultra-low RAM (~100MB) & 3x faster CPU execution.")
+                print(f"Loaded ONNX Runtime Engine ({so.intra_op_num_threads} CPU threads): Ultra-low RAM & 3x faster CPU execution.")
             except Exception as ort_err:
                 print(f"Notice: ONNX Runtime initialization note: {ort_err}. Falling back to PyTorch...")
 
@@ -145,13 +145,18 @@ class VideoProcessor:
 
         print(f"Video FPS : {fps} | Total Frames : {total_frames}")
 
-        # Cloud optimization: Use stride=2 for 60FPS or long footage to cut CPU load by 50%
-        stride = 1
-        if fps >= 45 or total_frames > 150:
-            stride = 2
+        # Adaptive cloud stride: 
+        # Scan every 4th frame during bowler run-up (75% less work), switch to stride 2 during delivery
+        target_delivery_stride = 2 if (fps >= 45 or total_frames > 150) else 1
+        effective_fps = fps / target_delivery_stride
+        effective_total_frames = max(1, total_frames // target_delivery_stride)
 
-        effective_fps = fps / stride
-        effective_total_frames = max(1, total_frames // stride)
+        # Output resolution optimization: cap at 720 max dimension so ffmpeg encodes in < 2 seconds
+        out_w, out_h = width, height
+        if max(width, height) > 720:
+            scale_out = 720.0 / max(width, height)
+            out_w = int(width * scale_out) & ~1
+            out_h = int(height * scale_out) & ~1
 
         temp_output = output_video.replace(".mp4", "_temp.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -160,7 +165,7 @@ class VideoProcessor:
             temp_output,
             fourcc,
             effective_fps,
-            (width, height)
+            (out_w, out_h)
         )
 
         if not out.isOpened():
@@ -179,6 +184,7 @@ class VideoProcessor:
         raw_frame_number = 0
         last_ball_frame = 0
         slow_frames = 0
+        in_delivery_phase = False
         trajectory_points = []
 
         while True:
@@ -187,7 +193,9 @@ class VideoProcessor:
                 break
 
             raw_frame_number += 1
-            if stride > 1 and (raw_frame_number % stride != 0):
+            # Adaptive stride: scan 2x target stride during run-up, 1x during ball flight
+            current_stride = target_delivery_stride if in_delivery_phase else (target_delivery_stride * 2)
+            if raw_frame_number % current_stride != 0:
                 continue
 
             frame_number += 1
@@ -306,6 +314,10 @@ class VideoProcessor:
                         instant_speed, pixel_dist, detected_speed
                     )
 
+                    # Once ball starts moving towards batsman, lock into high-precision delivery phase
+                    if detected_speed > 15.0 or len(primary_track.smoothed_history) >= 3:
+                        in_delivery_phase = True
+
                 print(
                     f"Frame {frame_number} | "
                     f"Tracked Ball {current_center} | "
@@ -326,7 +338,7 @@ class VideoProcessor:
 
             # Early delivery completion:
             # 1. Ball reached batsman at baseline/bottom of pitch after bowling release
-            if ball_found and maximum_speed > 30.0 and current_center[1] > int(height * 0.80) and len(trajectory_points) >= 8:
+            if ball_found and maximum_speed > 30.0 and current_center[1] > int(height * 0.80) and len(trajectory_points) >= 6:
                 print(f"Delivery completed at frame {raw_frame_number}! Ball reached batsman crease (y={current_center[1]}).")
                 break
 
@@ -339,7 +351,7 @@ class VideoProcessor:
                         break
                 else:
                     slow_frames = 0
-            elif raw_frame_number - last_ball_frame > 30 and len(trajectory_points) >= 10:
+            elif raw_frame_number - last_ball_frame > 25 and len(trajectory_points) >= 8:
                 print(f"Ball delivery track completed at frame {raw_frame_number}.")
                 break
 
@@ -377,7 +389,10 @@ class VideoProcessor:
             detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
             cv2.putText(annotated, detect_text, (x1 + 15, y1 + 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, detect_color, 1)
 
-            out.write(annotated)
+            if (out_w, out_h) != (width, height):
+                out.write(cv2.resize(annotated, (out_w, out_h)))
+            else:
+                out.write(annotated)
 
         cap.release()
         out.release()
