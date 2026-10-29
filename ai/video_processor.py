@@ -4,7 +4,15 @@ import os
 import math
 import platform
 import shutil
+import gc
+import torch
 from ultralytics import YOLO
+
+# Limit PyTorch CPU threads to prevent thread thrashing & memory spikes on cloud instances
+try:
+    torch.set_num_threads(2)
+except Exception:
+    pass
 
 
 class VideoProcessor:
@@ -16,12 +24,16 @@ class VideoProcessor:
 
         # Existing Antigravity-trained model or fallback
         model_path = "weights/tennis_ball_detector.pt"
-        if not os.path.exists(model_path):
-            if os.path.exists("tennis_ball_detector.pt"):
+        self.is_custom_model = True
+
+        # Ensure model is a valid weights binary (>100KB, not an unpulled LFS pointer)
+        if not os.path.exists(model_path) or os.path.getsize(model_path) < 100000:
+            if os.path.exists("tennis_ball_detector.pt") and os.path.getsize("tennis_ball_detector.pt") > 100000:
                 model_path = "tennis_ball_detector.pt"
             else:
-                print("Notice: weights/tennis_ball_detector.pt not found on server. Using yolov8n.pt fallback...")
+                print("Notice: weights/tennis_ball_detector.pt not found or unpulled. Using yolov8n.pt fallback...")
                 model_path = "yolov8n.pt"
+                self.is_custom_model = False
 
         self.model = YOLO(model_path)
 
@@ -151,13 +163,18 @@ class VideoProcessor:
             annotated = frame.copy()
 
             # ---------------- YOLO BALL DETECTION ----------------
-            results = self.model.predict(
-                source=frame,
-                imgsz=640,
-                conf=0.15,  # Fetch lower-confidence items for ByteTrack
-                iou=0.40,
-                verbose=False
-            )
+            predict_kwargs = {
+                "source": frame,
+                "imgsz": 384,
+                "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
+                "iou": 0.40,
+                "verbose": False
+            }
+            if not self.is_custom_model:
+                predict_kwargs["classes"] = [32]  # 'sports ball' in standard COCO
+
+            with torch.inference_mode():
+                results = self.model.predict(**predict_kwargs)
 
             detections = []
             scores = []
@@ -393,6 +410,14 @@ class VideoProcessor:
 
         if progress_callback:
             progress_callback(100, frame_number, total_frames, "Delivery analysis complete!")
+
+        # Free memory immediately on completion
+        try:
+            del cap
+            del out
+            gc.collect()
+        except Exception:
+            pass
 
         return {
             "speed": round(maximum_speed, 1),

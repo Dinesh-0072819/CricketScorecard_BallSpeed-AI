@@ -26,4 +26,5 @@ database/scorecard.db
 uploads/
 
 # Large AI model files
-weights/
+weights/*
+!weights/*.pt
