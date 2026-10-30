@@ -5,6 +5,7 @@ import math
 import platform
 import shutil
 import gc
+import numpy as np
 import torch
 from ultralytics import YOLO
 
@@ -164,6 +165,15 @@ class VideoProcessor:
         slow_frames = 0
         trajectory_points = []
 
+        # Adaptive Delivery Lifecycle State:
+        # 0 = SEARCH (runup / stride skip, run every 2nd frame)
+        # 1 = FLIGHT (ball in active delivery, run EVERY frame)
+        # 2 = COMPLETED (ball delivered & finished, skip DNN, render scoreboard only)
+        state = 0
+        post_delivery_frames = 0
+        scale_x = width / 640.0
+        scale_y = height / 640.0
+
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -179,54 +189,77 @@ class VideoProcessor:
             annotated = frame.copy()
 
             # ---------------- BALL DETECTION (OpenCV DNN / PyTorch) ----------------
+            run_dnn = True
+            if state == 2:
+                # Delivery already completed, skip expensive 640x640 DNN
+                run_dnn = False
+            elif state == 0:
+                # Search mode: evaluate every 2nd frame until ball release detected
+                if frame_number % 2 != 0:
+                    run_dnn = False
+
             detections = []
             scores = []
 
-            if self.use_dnn:
-                blob = cv2.dnn.blobFromImage(frame, 1/255.0, (640, 640), swapRB=True, crop=False)
-                self.net.setInput(blob)
-                preds = self.net.forward()[0].T
+            if run_dnn:
+                if self.use_dnn:
+                    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (640, 640), swapRB=True, crop=False)
+                    self.net.setInput(blob)
+                    preds = self.net.forward()[0].T
 
-                boxes_list, scores_list = [], []
-                for p in preds:
-                    conf = float(p[4])
-                    if conf > 0.15:
-                        cx, cy, bw, bh = p[:4]
-                        x = int((cx - bw/2) * (width / 640.0))
-                        y = int((cy - bh/2) * (height / 640.0))
-                        boxes_list.append([x, y, int(bw * width / 640.0), int(bh * height / 640.0)])
-                        scores_list.append(conf)
+                    # Vectorized NumPy box extraction (~30x faster than Python loop)
+                    conf_mask = preds[:, 4] > 0.15
+                    filtered = preds[conf_mask]
+                    if len(filtered) > 0:
+                        cx = filtered[:, 0]
+                        cy = filtered[:, 1]
+                        bw = filtered[:, 2]
+                        bh = filtered[:, 3]
+                        sc = filtered[:, 4]
 
-                if boxes_list:
-                    indices = cv2.dnn.NMSBoxes(boxes_list, scores_list, 0.15, 0.45)
-                    for idx in indices:
-                        b = boxes_list[idx]
-                        detections.append(((b[0] + b[2]//2), (b[1] + b[3]//2)))
-                        scores.append(scores_list[idx])
-            else:
-                predict_kwargs = {
-                    "source": frame,
-                    "imgsz": 640,
-                    "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
-                    "iou": 0.40,
-                    "verbose": False
-                }
-                if not self.is_custom_model:
-                    predict_kwargs["classes"] = [32]  # 'sports ball' in standard COCO
+                        xs = ((cx - bw / 2.0) * scale_x).astype(int)
+                        ys = ((cy - bh / 2.0) * scale_y).astype(int)
+                        ws = (bw * scale_x).astype(int)
+                        hs = (bh * scale_y).astype(int)
 
-                with torch.inference_mode():
-                    results = self.model.predict(**predict_kwargs)
+                        boxes_list = np.column_stack([xs, ys, ws, hs]).tolist()
+                        scores_list = sc.tolist()
 
-                for result in results:
-                    if result.boxes is None:
-                        continue
-                    for box in result.boxes:
-                        confidence = float(box.conf[0])
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-                        detections.append((cx, cy))
-                        scores.append(confidence)
+                        indices = cv2.dnn.NMSBoxes(boxes_list, scores_list, 0.15, 0.45)
+                        for idx in indices:
+                            b = boxes_list[idx]
+                            detections.append(((b[0] + b[2]//2), (b[1] + b[3]//2)))
+                            scores.append(scores_list[idx])
+
+                        if state == 0 and len(detections) > 0:
+                            state = 1
+                else:
+                    predict_kwargs = {
+                        "source": frame,
+                        "imgsz": 640,
+                        "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
+                        "iou": 0.40,
+                        "verbose": False
+                    }
+                    if not self.is_custom_model:
+                        predict_kwargs["classes"] = [32]  # 'sports ball' in standard COCO
+
+                    with torch.inference_mode():
+                        results = self.model.predict(**predict_kwargs)
+
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            confidence = float(box.conf[0])
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            cx = (x1 + x2) // 2
+                            cy = (y1 + y2) // 2
+                            detections.append((cx, cy))
+                            scores.append(confidence)
+
+                    if state == 0 and len(detections) > 0:
+                        state = 1
 
             # ---------------- BYTETRACK & KALMAN ASSOCIATION ----------------
             active_tracks = tracker.update(detections, scores)
@@ -283,11 +316,20 @@ class VideoProcessor:
                         instant_speed, pixel_dist, detected_speed
                     )
 
-                print(
-                    f"Frame {frame_number} | "
-                    f"Tracked Ball {current_center} | "
-                    f"Smoothed Speed {detected_speed:.1f} km/h"
-                )
+                # Check for delivery flight completion:
+                # If the ball reached delivery bowling speed (>=25 km/h) and then slows down or ends flight
+                if state == 1 and maximum_speed >= 25.0:
+                    if detected_speed < 8.0:
+                        post_delivery_frames += 1
+                    else:
+                        post_delivery_frames = 0
+                    if post_delivery_frames >= 25:
+                        state = 2  # Delivery completed!
+            else:
+                if state == 1 and maximum_speed >= 25.0:
+                    post_delivery_frames += 1
+                    if post_delivery_frames >= 25:
+                        state = 2
 
             # ---------------- BALL TRAIL DRAWING ----------------
             if ball_found and len(primary_track.smoothed_history) > 1:
@@ -331,8 +373,8 @@ class VideoProcessor:
             cv2.putText(annotated, status, (x1 + 15, y1 + 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
             
             # State
-            detect_text = "TRACKED" if ball_found else "LOST"
-            detect_color = (0, 255, 0) if ball_found else (0, 0, 255)
+            detect_text = "TRACKED" if ball_found else ("COMPLETE" if state == 2 else "LOST")
+            detect_color = (0, 255, 0) if ball_found else ((0, 255, 255) if state == 2 else (0, 0, 255))
             cv2.putText(annotated, detect_text, (x1 + 15, y1 + 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, detect_color, 1)
 
             out.write(annotated)
