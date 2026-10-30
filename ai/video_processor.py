@@ -6,6 +6,7 @@ import platform
 import shutil
 import gc
 import torch
+import requests
 import numpy as np
 from ultralytics import YOLO
 
@@ -33,6 +34,18 @@ class VideoProcessor:
 
         self.model = YOLO(model_path)
         self.H = None
+
+        # Roboflow Cloud GPU inference configuration
+        self.use_roboflow = os.getenv("USE_ROBOFLOW_CLOUD", "false").lower() == "true"
+        self.roboflow_api_key = os.getenv("ROBOFLOW_API_KEY", "")
+        self.roboflow_project = os.getenv("ROBOFLOW_PROJECT", "")
+        self.roboflow_workspace = os.getenv("ROBOFLOW_WORKSPACE", "")
+        self.roboflow_warned = False
+        if self.use_roboflow and self.roboflow_api_key:
+            print("Roboflow Cloud GPU Integration: ENABLED")
+        else:
+            print("Roboflow Cloud GPU Integration: DISABLED (using local engine)")
+
         print("Model Loaded Successfully")
         print("=" * 50)
         print()
@@ -160,29 +173,59 @@ class VideoProcessor:
 
             annotated = frame.copy()
 
-            # ---------------- YOLO BALL DETECTION ----------------
-            with torch.inference_mode():
-                results = self.model.predict(
-                    source=frame,
-                    imgsz=640,
-                    conf=0.15,
-                    iou=0.40,
-                    verbose=False
-                )
-
             detections = []
             scores = []
+            used_cloud = False
 
-            for result in results:
-                if result.boxes is None:
-                    continue
-                for box in result.boxes:
-                    confidence = float(box.conf[0])
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-                    detections.append((cx, cy))
-                    scores.append(confidence)
+            # ---------------- ROBOFLOW CLOUD GPU INFERENCE ----------------
+            if self.use_roboflow and self.roboflow_api_key and self.roboflow_project:
+                try:
+                    _, img_encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                    ep = f"https://detect.roboflow.com/{self.roboflow_project}/1?api_key={self.roboflow_api_key}&confidence=15"
+                    res = requests.post(
+                        ep,
+                        data=img_encoded.tobytes(),
+                        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                        timeout=1.5
+                    )
+                    if res.status_code == 200:
+                        pred_data = res.json()
+                        for pred in pred_data.get("predictions", []):
+                            cx = int(pred["x"])
+                            cy = int(pred["y"])
+                            conf = float(pred.get("confidence", 0.5))
+                            detections.append((cx, cy))
+                            scores.append(conf)
+                        used_cloud = True
+                    elif not self.roboflow_warned:
+                        print(f"Roboflow Cloud notice (HTTP {res.status_code}): Using high-precision local YOLO engine.")
+                        self.roboflow_warned = True
+                except Exception as rf_err:
+                    if not self.roboflow_warned:
+                        print(f"Roboflow Cloud connection note: {rf_err}. Using local YOLO engine.")
+                        self.roboflow_warned = True
+
+            # ---------------- LOCAL YOLO BALL DETECTION (FALLBACK / DEFAULT) ----------------
+            if not used_cloud:
+                with torch.inference_mode():
+                    results = self.model.predict(
+                        source=frame,
+                        imgsz=640,
+                        conf=0.15,
+                        iou=0.40,
+                        verbose=False
+                    )
+
+                for result in results:
+                    if result.boxes is None:
+                        continue
+                    for box in result.boxes:
+                        confidence = float(box.conf[0])
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        cx = (x1 + x2) // 2
+                        cy = (y1 + y2) // 2
+                        detections.append((cx, cy))
+                        scores.append(confidence)
 
             # ---------------- BYTETRACK & KALMAN ASSOCIATION ----------------
             active_tracks = tracker.update(detections, scores)
