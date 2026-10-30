@@ -23,33 +23,15 @@ class VideoProcessor:
         print("Loading Tennis Ball AI Model...")
         print("=" * 50)
 
-        # 1. High-Performance OpenCV DNN Engine (2.3x faster than PyTorch, ultra-low ~40MB RAM)
-        onnx_path = "weights/tennis_ball_detector.onnx"
-        self.use_opencv_dnn = False
-        self.is_custom_model = True
-
-        if os.path.exists(onnx_path) and os.path.getsize(onnx_path) > 100000:
-            try:
-                self.net = cv2.dnn.readNetFromONNX(onnx_path)
-                self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-                self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-                self.use_opencv_dnn = True
-                print("Loaded High-Speed OpenCV DNN Engine: 2.3x faster execution, <50MB RAM.")
-            except Exception as dnn_err:
-                print(f"Notice: OpenCV DNN init: {dnn_err}. Using PyTorch fallback.")
-
-        # 2. PyTorch Fallback
+        # Standard custom YOLO model
         model_path = "weights/tennis_ball_detector.pt"
         if not os.path.exists(model_path) or os.path.getsize(model_path) < 100000:
             if os.path.exists("tennis_ball_detector.pt") and os.path.getsize("tennis_ball_detector.pt") > 100000:
                 model_path = "tennis_ball_detector.pt"
             else:
-                print("Notice: weights/tennis_ball_detector.pt not found or unpulled. Using yolov8n.pt fallback...")
                 model_path = "yolov8n.pt"
-                self.is_custom_model = False
 
         self.model = YOLO(model_path)
-
         self.H = None
         print("Model Loaded Successfully")
         print("=" * 50)
@@ -151,23 +133,18 @@ class VideoProcessor:
             cap.release()
             return {"speed": 0.0, "status": "ERROR"}
 
-        # Initialize tracking, speed, and alarm modules (adapted confidence thresholds for night/floodlight turfs)
-        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.20, low_threshold=0.08)
+        # Initialize tracking, speed, and alarm modules (Exact proven configuration)
+        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
         estimator = SpeedEstimator(fps=fps, max_speed_limit=max_speed)
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
         maximum_speed = 0.0
-        peak_instant_speed = 0.0
         status = "SAFE"
         frame_number = 0
         raw_frame_number = 0
         last_ball_frame = 0
-        delivery_active = False
-        delivery_finished = False
-        flight_frames = 0
         trajectory_points = []
-        delivery_trajectory_points = []
 
         while True:
             ret, frame = cap.read()
@@ -183,60 +160,29 @@ class VideoProcessor:
 
             annotated = frame.copy()
 
-            # Continuous OpenCV DNN inference across all frames ensures both daytime and night floodlight deliveries are reliably tracked
-            run_detection = True
+            # ---------------- YOLO BALL DETECTION ----------------
+            with torch.inference_mode():
+                results = self.model.predict(
+                    source=frame,
+                    imgsz=640,
+                    conf=0.15,
+                    iou=0.40,
+                    verbose=False
+                )
 
-            # ---------------- BALL DETECTION (OpenCV DNN / PyTorch) ----------------
             detections = []
             scores = []
 
-            if run_detection:
-                if self.use_opencv_dnn:
-                    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (640, 640), swapRB=True, crop=False)
-                    self.net.setInput(blob)
-                    preds = self.net.forward()[0].T
-
-                    mask = preds[:, 4] >= 0.08
-                    valid_preds = preds[mask]
-                    if len(valid_preds) > 0:
-                        cxs, cys, bws, bhs = valid_preds[:, 0], valid_preds[:, 1], valid_preds[:, 2], valid_preds[:, 3]
-                        boxes = np.stack([
-                            (cxs - bws / 2.0) * (width / 640.0),
-                            (cys - bhs / 2.0) * (height / 640.0),
-                            bws * (width / 640.0),
-                            bhs * (height / 640.0)
-                        ], axis=1).astype(int).tolist()
-                        confs = valid_preds[:, 4].tolist()
-
-                        indices = cv2.dnn.NMSBoxes(boxes, confs, 0.08, 0.40)
-                        for idx in indices:
-                            b = boxes[idx]
-                            detections.append((b[0] + b[2] // 2, b[1] + b[3] // 2))
-                            scores.append(confs[idx])
-                else:
-                    predict_kwargs = {
-                        "source": frame,
-                        "imgsz": 640,
-                        "conf": 0.08,  # Fetch lower-confidence items for ByteTrack
-                        "iou": 0.40,
-                        "verbose": False
-                    }
-                    if not self.is_custom_model:
-                        predict_kwargs["classes"] = [32]  # 'sports ball' in standard COCO
-
-                    with torch.inference_mode():
-                        results = self.model.predict(**predict_kwargs)
-
-                    for result in results:
-                        if result.boxes is None:
-                            continue
-                        for box in result.boxes:
-                            confidence = float(box.conf[0])
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            cx = (x1 + x2) // 2
-                            cy = (y1 + y2) // 2
-                            detections.append((cx, cy))
-                            scores.append(confidence)
+            for result in results:
+                if result.boxes is None:
+                    continue
+                for box in result.boxes:
+                    confidence = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
+                    detections.append((cx, cy))
+                    scores.append(confidence)
 
             # ---------------- BYTETRACK & KALMAN ASSOCIATION ----------------
             active_tracks = tracker.update(detections, scores)
@@ -245,25 +191,7 @@ class VideoProcessor:
             current_center = None
 
             if active_tracks:
-                # Select the delivery ball track (preferring track with forward delivery motion towards batsman)
-                best_candidate = None
-                best_metric = -1.0
-                for tr in active_tracks:
-                    score = tr.score
-                    if len(tr.smoothed_history) >= 2:
-                        p1 = tr.smoothed_history[-2]
-                        p2 = tr.smoothed_history[-1]
-                        dy = p2[1] - p1[1]
-                        dx = p2[0] - p1[0]
-                        spd = math.sqrt(dx * dx + dy * dy) * 0.025 * fps * 3.6
-                        if dy > 0 and 15.0 <= spd <= 180.0:
-                            score += 10.0 + (spd / 10.0)
-                    if score > best_metric:
-                        best_metric = score
-                        best_candidate = tr
-                primary_track = best_candidate if best_candidate else active_tracks[0]
-
-                # Get the smoothed tracking coordinate from Kalman Filter history
+                primary_track = active_tracks[0]
                 raw_center = primary_track.history[-1]
                 smoothed_center = primary_track.smoothed_history[-1]
                 
@@ -301,42 +229,10 @@ class VideoProcessor:
                     p1 = primary_track.smoothed_history[-2]
                     p2 = primary_track.smoothed_history[-1]
                     
-                    # Compute instantaneous speed strictly as per Section 6 principle
                     instant_speed, pixel_dist = estimator.calculate_speed(p1, p2, self.H)
-                    
-                    # Step 5: Peak selection - track maximum instantaneous velocity
-                    if pixel_dist < 120.0 and 15.0 <= instant_speed <= 180.0:
-                        if instant_speed > peak_instant_speed:
-                            peak_instant_speed = instant_speed
-                            if instant_speed >= 30.0 and not delivery_active:
-                                delivery_active = True
-                                delivery_finished = False
-
-                        if not delivery_active and not delivery_finished and instant_speed >= 30.0:
-                            delivery_active = True
-
-                    # Validate and smooth speed for radar HUD display
                     detected_speed, valid = estimator.validate_and_smooth(
                         instant_speed, pixel_dist, detected_speed
                     )
-
-                    if detected_speed > 15.0 and not delivery_active and not delivery_finished:
-                        delivery_active = True
-
-            if delivery_active:
-                flight_frames += 1
-                if current_center:
-                    delivery_trajectory_points.append(current_center)
-
-                # Check if ball has finished delivery flight (passed batsman, bat contact, or rebound)
-                if len(delivery_trajectory_points) >= 2:
-                    dy_step = delivery_trajectory_points[-1][1] - delivery_trajectory_points[-2][1]
-                    if dy_step < -5.0:  # Bat contact or reversal
-                        delivery_active = False
-                        delivery_finished = True
-                elif flight_frames > 25 and detected_speed < maximum_speed * 0.35:
-                    delivery_active = False
-                    delivery_finished = True
 
                 print(
                     f"Frame {frame_number} | "
@@ -353,7 +249,6 @@ class VideoProcessor:
                     pt2 = (int(trail[i][0]), int(trail[i][1]))
                     cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
 
-            # Record peak smoothed velocity
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
 
@@ -471,7 +366,7 @@ class VideoProcessor:
 
         # Analyze complete delivery trajectory for Angle of Deviation, Swing, and Turn
         from ai.delivery_analysis import analyze_delivery
-        pts_to_analyze = delivery_trajectory_points if len(delivery_trajectory_points) >= 4 else trajectory_points
+        pts_to_analyze = trajectory_points
         analysis = analyze_delivery(
             pts_to_analyze,
             fps=fps,
