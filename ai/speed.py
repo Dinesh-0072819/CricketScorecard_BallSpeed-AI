@@ -33,21 +33,17 @@ class SpeedEstimator:
         """
         Calculates instantaneous speed in km/h between two points.
         p1, p2: (x, y) tuples representing consecutive positions.
+        H: Optional perspective Homography matrix.
         Strict rule: calculate only ball towards camera (dy > 0), not away (dy <= 0).
         """
         dy = p2[1] - p1[1]
 
-        # Only calculate ball towards camera (dy > 0), not away from camera (dy <= 0)
+        # If the ball is moving away from the camera (dy <= 0), do not calculate speed
         if dy <= 0:
             return 0.0, 0.0
 
         dx = p2[0] - p1[0]
         pixel_distance = math.sqrt(dx * dx + dy * dy)
-        if pixel_distance < 1.0:
-            return 0.0, 0.0
-
-        # Primary reliable distance calculation (pixel-to-meter scaling)
-        distance = pixel_distance * self.pixel_to_meter
 
         if H is not None:
             world_p1 = self.pixel_to_world(p1, H)
@@ -55,10 +51,11 @@ class SpeedEstimator:
             if world_p1 is not None and world_p2 is not None:
                 w_dx = world_p2[0] - world_p1[0]
                 w_dy = world_p2[1] - world_p1[1]
-                w_dist = math.sqrt(w_dx * w_dx + w_dy * w_dy)
-                w_speed = w_dist * self.fps * 3.6
-                if 15.0 <= w_speed <= 165.0:
-                    distance = w_dist
+                distance = math.sqrt(w_dx * w_dx + w_dy * w_dy)
+            else:
+                distance = pixel_distance * self.pixel_to_meter
+        else:
+            distance = pixel_distance * self.pixel_to_meter
 
         # instant speed = distance (m) * fps * 3.6 (conversion to km/h)
         instant_speed = distance * self.fps * 3.6
@@ -68,9 +65,6 @@ class SpeedEstimator:
         """
         Validate and smooth speed to prevent spikes.
         """
-        if instant_speed <= 0.0:
-            return current_smoothed_speed, False
-
         if pixel_distance < self.max_pixel_jump and instant_speed < 180.0:
             smoothed_speed = (
                 current_smoothed_speed * self.smoothing_factor +

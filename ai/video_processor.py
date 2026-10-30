@@ -124,21 +124,13 @@ class VideoProcessor:
 
         print(f"Video FPS : {fps} | Total Frames : {total_frames}")
 
-        # Cloud optimization: Use stride=2 for 60FPS or long footage to cut CPU load by 50%
-        stride = 1
-        if fps >= 45 or total_frames > 150:
-            stride = 2
-
-        effective_fps = fps / stride
-        effective_total_frames = max(1, total_frames // stride)
-
         temp_output = output_video.replace(".mp4", "_temp.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
         out = cv2.VideoWriter(
             temp_output,
             fourcc,
-            effective_fps,
+            fps,
             (width, height)
         )
 
@@ -147,8 +139,8 @@ class VideoProcessor:
             return {"speed": 0.0, "status": "ERROR"}
 
         # Initialize tracking, speed, and alarm modules
-        tracker = ByteTracker(dt=1.0/effective_fps, high_threshold=0.40, low_threshold=0.15)
-        estimator = SpeedEstimator(fps=effective_fps, max_speed_limit=max_speed)
+        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
+        estimator = SpeedEstimator(fps=fps, max_speed_limit=max_speed)
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
@@ -166,14 +158,11 @@ class VideoProcessor:
                 break
 
             raw_frame_number += 1
-            if stride > 1 and (raw_frame_number % stride != 0):
-                continue
-
             frame_number += 1
 
             if progress_callback:
-                pct = min(92, max(1, int((frame_number / effective_total_frames) * 92)))
-                progress_callback(pct, frame_number, effective_total_frames, f"AI Tracking Delivery: Frame {frame_number} of {effective_total_frames} ({pct}%)")
+                pct = min(92, max(1, int((frame_number / total_frames) * 92)))
+                progress_callback(pct, frame_number, total_frames, f"AI Tracking Delivery: Frame {frame_number} of {total_frames} ({pct}%)")
 
             annotated = frame.copy()
 
@@ -394,7 +383,7 @@ class VideoProcessor:
         from ai.delivery_analysis import analyze_delivery
         analysis = analyze_delivery(
             trajectory_points,
-            fps=effective_fps,
+            fps=fps,
             pixel_to_meter=0.025,
             speed_kmh=maximum_speed
         )
