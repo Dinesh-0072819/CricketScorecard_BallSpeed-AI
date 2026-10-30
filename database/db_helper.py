@@ -8,6 +8,14 @@ try:
 except Exception:
     CA_FILE = None
 
+def get_clean_uri():
+    uri = Config.MONGO_URI.strip().strip("'\"")
+    if uri.startswith("mongodb+srv:///"):
+        uri = "mongodb+srv://" + uri[len("mongodb+srv:///"):].lstrip("/")
+    elif uri.startswith("mongodb:///"):
+        uri = "mongodb://" + uri[len("mongodb:///"):].lstrip("/")
+    return uri
+
 def get_db():
     kwargs = {
         "serverSelectionTimeoutMS": 5000,
@@ -16,7 +24,7 @@ def get_db():
     }
     if CA_FILE:
         kwargs["tlsCAFile"] = CA_FILE
-    client = MongoClient(Config.MONGO_URI, **kwargs)
+    client = MongoClient(get_clean_uri(), **kwargs)
     return client[Config.MONGO_DB_NAME]
 
 def init_db():
