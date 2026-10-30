@@ -6,6 +6,7 @@ import platform
 import shutil
 import gc
 import torch
+import numpy as np
 from ultralytics import YOLO
 
 # Limit PyTorch CPU threads to prevent thread thrashing & memory spikes on cloud instances
@@ -161,7 +162,9 @@ class VideoProcessor:
         frame_number = 0
         raw_frame_number = 0
         last_ball_frame = 0
-        slow_frames = 0
+        delivery_active = False
+        delivery_finished = False
+        flight_frames = 0
         trajectory_points = []
 
         while True:
@@ -178,55 +181,68 @@ class VideoProcessor:
 
             annotated = frame.copy()
 
+            # ---------------- FAST DELIVERY SCANNING ----------------
+            # Run DNN every 3rd frame during run-up & post-shot follow through
+            # Run DNN on EVERY frame (1x) during active delivery flight for maximum velocity accuracy
+            run_detection = True
+            if not delivery_active and not delivery_finished:
+                if raw_frame_number % 3 != 0:
+                    run_detection = False
+            elif delivery_finished:
+                if raw_frame_number % 3 != 0:
+                    run_detection = False
+
             # ---------------- BALL DETECTION (OpenCV DNN / PyTorch) ----------------
             detections = []
             scores = []
 
-            if self.use_opencv_dnn:
-                blob = cv2.dnn.blobFromImage(frame, 1/255.0, (640, 640), swapRB=True, crop=False)
-                self.net.setInput(blob)
-                preds = self.net.forward()[0].T
+            if run_detection:
+                if self.use_opencv_dnn:
+                    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (640, 640), swapRB=True, crop=False)
+                    self.net.setInput(blob)
+                    preds = self.net.forward()[0].T
 
-                boxes, confs = [], []
-                for p in preds:
-                    s = float(p[4])
-                    if s >= 0.15:
-                        cx, cy, bw, bh = p[:4]
-                        x1 = int((cx - bw / 2.0) * (width / 640.0))
-                        y1 = int((cy - bh / 2.0) * (height / 640.0))
-                        boxes.append([x1, y1, int(bw * width / 640.0), int(bh * height / 640.0)])
-                        confs.append(s)
+                    mask = preds[:, 4] >= 0.15
+                    valid_preds = preds[mask]
+                    if len(valid_preds) > 0:
+                        cxs, cys, bws, bhs = valid_preds[:, 0], valid_preds[:, 1], valid_preds[:, 2], valid_preds[:, 3]
+                        boxes = np.stack([
+                            (cxs - bws / 2.0) * (width / 640.0),
+                            (cys - bhs / 2.0) * (height / 640.0),
+                            bws * (width / 640.0),
+                            bhs * (height / 640.0)
+                        ], axis=1).astype(int).tolist()
+                        confs = valid_preds[:, 4].tolist()
 
-                if boxes:
-                    indices = cv2.dnn.NMSBoxes(boxes, confs, 0.15, 0.40)
-                    for idx in indices:
-                        b = boxes[idx]
-                        detections.append((b[0] + b[2] // 2, b[1] + b[3] // 2))
-                        scores.append(confs[idx])
-            else:
-                predict_kwargs = {
-                    "source": frame,
-                    "imgsz": 640,
-                    "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
-                    "iou": 0.40,
-                    "verbose": False
-                }
-                if not self.is_custom_model:
-                    predict_kwargs["classes"] = [32]  # 'sports ball' in standard COCO
+                        indices = cv2.dnn.NMSBoxes(boxes, confs, 0.15, 0.40)
+                        for idx in indices:
+                            b = boxes[idx]
+                            detections.append((b[0] + b[2] // 2, b[1] + b[3] // 2))
+                            scores.append(confs[idx])
+                else:
+                    predict_kwargs = {
+                        "source": frame,
+                        "imgsz": 640,
+                        "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
+                        "iou": 0.40,
+                        "verbose": False
+                    }
+                    if not self.is_custom_model:
+                        predict_kwargs["classes"] = [32]  # 'sports ball' in standard COCO
 
-                with torch.inference_mode():
-                    results = self.model.predict(**predict_kwargs)
+                    with torch.inference_mode():
+                        results = self.model.predict(**predict_kwargs)
 
-                for result in results:
-                    if result.boxes is None:
-                        continue
-                    for box in result.boxes:
-                        confidence = float(box.conf[0])
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-                        detections.append((cx, cy))
-                        scores.append(confidence)
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            confidence = float(box.conf[0])
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            cx = (x1 + x2) // 2
+                            cy = (y1 + y2) // 2
+                            detections.append((cx, cy))
+                            scores.append(confidence)
 
             # ---------------- BYTETRACK & KALMAN ASSOCIATION ----------------
             active_tracks = tracker.update(detections, scores)
@@ -282,6 +298,15 @@ class VideoProcessor:
                     detected_speed, valid = estimator.validate_and_smooth(
                         instant_speed, pixel_dist, detected_speed
                     )
+
+                    if detected_speed > 15.0 and not delivery_active and not delivery_finished:
+                        delivery_active = True
+
+            if delivery_active:
+                flight_frames += 1
+                if flight_frames > 20 and detected_speed < maximum_speed * 0.40:
+                    delivery_active = False
+                    delivery_finished = True
 
                 print(
                     f"Frame {frame_number} | "
