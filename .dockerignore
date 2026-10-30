@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+frontend/node_modules/
+frontend/.vite/
+uploads/*.mp4
+CricSpeedAI.zip
+Video_sam/
