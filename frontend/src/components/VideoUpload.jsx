@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, Volume2, VolumeX, Zap, Loader2, Sparkles, Activity, Cpu } from 'lucide-react';
+import { UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, Volume2, VolumeX, Zap, Loader2, Sparkles, Activity, Cpu, Play, Pause, RotateCcw, ChevronLeft, ChevronRight, Sliders, Eye } from 'lucide-react';
 
 export default function VideoUpload() {
   const [file, setFile] = useState(null);
@@ -13,16 +13,13 @@ export default function VideoUpload() {
   const [error, setError] = useState('');
   const [isMuted, setIsMuted] = useState(false);
 
-  const pollIntervalRef = useRef(null);
+  // Video Player & Coaching Analysis states
   const videoRef = useRef(null);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  const [videoSourceMode, setVideoSourceMode] = useState('processed'); // 'processed' | 'original'
+  const [isPlaying, setIsPlaying] = useState(false);
 
-  const changePlaybackSpeed = (speed) => {
-    setPlaybackSpeed(speed);
-    if (videoRef.current) {
-      videoRef.current.playbackRate = speed;
-    }
-  };
+  const pollIntervalRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -191,6 +188,58 @@ export default function VideoUpload() {
     };
 
     xhr.send(formData);
+  };
+
+  const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+  const handleSpeedChange = (speed) => {
+    setPlaybackSpeed(speed);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = speed;
+    }
+  };
+
+  const handleTogglePlay = () => {
+    if (!videoRef.current) return;
+    if (videoRef.current.paused) {
+      videoRef.current.play();
+      setIsPlaying(true);
+    } else {
+      videoRef.current.pause();
+      setIsPlaying(false);
+    }
+  };
+
+  const handleRestart = () => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = 0;
+    videoRef.current.playbackRate = playbackSpeed;
+    videoRef.current.play();
+    setIsPlaying(true);
+  };
+
+  const handleStepFrame = (deltaSec) => {
+    if (!videoRef.current) return;
+    videoRef.current.pause();
+    setIsPlaying(false);
+    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.duration || 100, videoRef.current.currentTime + deltaSec));
+  };
+
+  const handleSwitchSource = (mode) => {
+    if (!videoRef.current) return;
+    const currentPos = videoRef.current.currentTime;
+    const wasPlaying = !videoRef.current.paused;
+    setVideoSourceMode(mode);
+    setTimeout(() => {
+      if (videoRef.current) {
+        videoRef.current.currentTime = currentPos;
+        videoRef.current.playbackRate = playbackSpeed;
+        if (wasPlaying) {
+          videoRef.current.play();
+          setIsPlaying(true);
+        }
+      }
+    }, 60);
   };
 
   const isNoBall = result && (result.ball_status === 'NO-BALL' || result.detected_speed > maxSpeedLimit);
@@ -517,48 +566,261 @@ export default function VideoUpload() {
               </div>
             </div>
 
-            {/* Video Player Display with Slow-Mo Controls */}
-            <div style={{ borderRadius: '16px', overflow: 'hidden', border: isNoBall ? '2px solid #ff1744' : '1px solid rgba(255,255,255,0.15)' }}>
-              <video
-                ref={videoRef}
-                controls
-                src={result.video_url}
-                style={{ width: '100%', maxHeight: '520px', background: '#000', display: 'block' }}
-                onPlay={() => {
-                  if (videoRef.current) videoRef.current.playbackRate = playbackSpeed;
-                }}
-              />
+            {/* Coach & Player Analysis Breakdown Box */}
+            <div style={{
+              background: 'rgba(5, 8, 17, 0.85)',
+              borderRadius: '12px',
+              padding: '16px 20px',
+              marginBottom: '20px',
+              border: '1px solid rgba(255, 171, 0, 0.25)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '12px'
+            }}>
+              <div>
+                <span style={{ fontSize: '11px', color: '#ffab00', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                  🎯 Spin & Trajectory Breakdown
+                </span>
+                <p style={{ fontSize: '14px', color: '#f8fafc', fontWeight: '700', marginTop: '4px' }}>
+                  {result.turn_direction || 'Straight'}: Off-the-pitch turn measured at{' '}
+                  <span style={{ color: '#ffab00', fontWeight: '900' }}>
+                    {result.deviation_angle != null ? Number(result.deviation_angle).toFixed(1) : '0.0'}°
+                  </span>{' '}
+                  with{' '}
+                  <span style={{ color: '#00e676', fontWeight: '900' }}>
+                    {result.swing_cm != null ? Number(result.swing_cm).toFixed(1) : '0.0'} cm
+                  </span>{' '}
+                  air swing drift.
+                </p>
+              </div>
+
+              <div style={{
+                padding: '6px 14px',
+                borderRadius: '8px',
+                fontSize: '12px',
+                fontWeight: '800',
+                background: 'rgba(255, 171, 0, 0.15)',
+                color: '#ffab00',
+                border: '1px solid rgba(255, 171, 0, 0.3)'
+              }}>
+                Turn: {result.deviation_angle != null ? Number(result.deviation_angle).toFixed(1) : '0.0'}° Deviation
+              </div>
+            </div>
+
+            {/* Player & Coach Video Analysis Suite */}
+            <div style={{
+              background: 'rgba(8, 12, 24, 0.95)',
+              borderRadius: '16px',
+              border: isNoBall ? '2px solid rgba(255, 23, 68, 0.5)' : '1px solid rgba(0, 242, 254, 0.3)',
+              padding: '20px',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)'
+            }}>
+              {/* Top Bar: Video Source Switcher & Active Speed Badge */}
               <div style={{
                 display: 'flex',
-                alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '10px 16px',
-                background: 'rgba(10, 15, 30, 0.9)',
-                borderTop: '1px solid rgba(255, 255, 255, 0.1)'
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '12px',
+                marginBottom: '16px'
               }}>
-                <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: '700' }}>
-                  ⚡ Playback Speed:
-                </span>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  {[0.25, 0.5, 0.75, 1.0].map((rate) => (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchSource('processed')}
+                    style={{
+                      padding: '8px 16px',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      cursor: 'pointer',
+                      border: videoSourceMode === 'processed' ? '1px solid #00f2fe' : '1px solid rgba(255,255,255,0.1)',
+                      background: videoSourceMode === 'processed' ? 'rgba(0, 242, 254, 0.2)' : 'rgba(255,255,255,0.05)',
+                      color: videoSourceMode === 'processed' ? '#00f2fe' : '#94a3b8',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Eye size={14} /> AI Trajectory & Speed HUD
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchSource('original')}
+                    style={{
+                      padding: '8px 16px',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      cursor: 'pointer',
+                      border: videoSourceMode === 'original' ? '1px solid #00e676' : '1px solid rgba(255,255,255,0.1)',
+                      background: videoSourceMode === 'original' ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255,255,255,0.05)',
+                      color: videoSourceMode === 'original' ? '#00e676' : '#94a3b8',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Film size={14} /> Original Video (Natural Speed)
+                  </button>
+                </div>
+
+                <div style={{
+                  padding: '6px 14px',
+                  borderRadius: '20px',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  background: playbackSpeed < 1.0 ? 'rgba(255, 171, 0, 0.15)' : playbackSpeed === 1.0 ? 'rgba(0, 242, 254, 0.15)' : 'rgba(255, 23, 68, 0.15)',
+                  border: playbackSpeed < 1.0 ? '1px solid rgba(255, 171, 0, 0.4)' : playbackSpeed === 1.0 ? '1px solid rgba(0, 242, 254, 0.4)' : '1px solid rgba(255, 23, 68, 0.4)',
+                  color: playbackSpeed < 1.0 ? '#ffab00' : playbackSpeed === 1.0 ? '#00f2fe' : '#ff1744',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}>
+                  <Zap size={14} />
+                  Playback: {playbackSpeed}x {playbackSpeed < 1.0 ? '(Slow Motion)' : playbackSpeed === 1.0 ? '(Normal Speed)' : '(Fast)'}
+                </div>
+              </div>
+
+              {/* Video Element */}
+              <div style={{
+                borderRadius: '12px',
+                overflow: 'hidden',
+                background: '#000',
+                position: 'relative',
+                marginBottom: '16px'
+              }}>
+                <video
+                  ref={videoRef}
+                  key={videoSourceMode}
+                  controls
+                  playsInline
+                  src={videoSourceMode === 'original' ? (result.original_video_url || result.video_url) : result.video_url}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                  onLoadedMetadata={() => {
+                    if (videoRef.current) videoRef.current.playbackRate = playbackSpeed;
+                  }}
+                  style={{ width: '100%', maxHeight: '480px', display: 'block', margin: '0 auto' }}
+                />
+              </div>
+
+              {/* Video Controls & Slow Motion Bar */}
+              <div style={{
+                background: 'rgba(15, 23, 42, 0.8)',
+                borderRadius: '12px',
+                padding: '16px',
+                border: '1px solid rgba(255, 255, 255, 0.08)'
+              }}>
+                {/* Slow-Mo & Speed Presets */}
+                <div style={{ marginBottom: '14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+                    <Sliders size={14} color="#00f2fe" />
+                    <span style={{ fontSize: '12px', fontWeight: '800', color: '#cbd5e1', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      Player Analysis Playback Speed:
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {SPEED_OPTIONS.map((spd) => {
+                      const isActive = playbackSpeed === spd;
+                      const isSlow = spd < 1.0;
+                      const isNormal = spd === 1.0;
+                      return (
+                        <button
+                          key={spd}
+                          type="button"
+                          onClick={() => handleSpeedChange(spd)}
+                          style={{
+                            flex: '1 1 auto',
+                            minWidth: '70px',
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            fontSize: '12px',
+                            fontWeight: '800',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease',
+                            border: isActive
+                              ? (isSlow ? '1px solid #ffab00' : isNormal ? '1px solid #00f2fe' : '1px solid #00e676')
+                              : '1px solid rgba(255, 255, 255, 0.12)',
+                            background: isActive
+                              ? (isSlow ? 'rgba(255, 171, 0, 0.25)' : isNormal ? 'rgba(0, 242, 254, 0.25)' : 'rgba(0, 230, 118, 0.25)')
+                              : 'rgba(255, 255, 255, 0.04)',
+                            color: isActive
+                              ? (isSlow ? '#ffab00' : isNormal ? '#00f2fe' : '#00e676')
+                              : '#94a3b8',
+                            boxShadow: isActive ? '0 0 12px rgba(0, 242, 254, 0.2)' : 'none'
+                          }}
+                        >
+                          {spd}x {spd === 0.25 ? '🔥 1/4x' : spd === 0.5 ? '⚡ 1/2x' : spd === 1.0 ? '🎯 Normal' : ''}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Frame-by-Frame & Action Controls */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '10px',
+                  paddingTop: '12px',
+                  borderTop: '1px solid rgba(255, 255, 255, 0.08)'
+                }}>
+                  <div style={{ display: 'flex', gap: '8px' }}>
                     <button
-                      key={rate}
                       type="button"
-                      onClick={() => changePlaybackSpeed(rate)}
+                      onClick={() => handleStepFrame(-0.033)}
+                      className="btn-action"
+                      style={{ padding: '8px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                      title="Step back 1 frame for release & seam analysis"
+                    >
+                      <ChevronLeft size={16} /> -1 Frame
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleTogglePlay}
+                      className="btn-action"
                       style={{
-                        padding: '4px 10px',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        fontWeight: '800',
-                        border: playbackSpeed === rate ? '1px solid #00f2fe' : '1px solid rgba(255, 255, 255, 0.1)',
-                        background: playbackSpeed === rate ? 'rgba(0, 242, 254, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                        color: playbackSpeed === rate ? '#00f2fe' : '#94a3b8',
-                        cursor: 'pointer'
+                        padding: '8px 16px',
+                        fontSize: '12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        borderColor: '#00f2fe',
+                        color: '#00f2fe',
+                        background: 'rgba(0, 242, 254, 0.12)'
                       }}
                     >
-                      {rate === 1.0 ? '1.0x (Normal)' : `${rate}x Slow-Mo`}
+                      {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                      {isPlaying ? 'Pause' : 'Play'}
                     </button>
-                  ))}
+
+                    <button
+                      type="button"
+                      onClick={() => handleStepFrame(0.033)}
+                      className="btn-action"
+                      style={{ padding: '8px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                      title="Step forward 1 frame for bounce & pitch analysis"
+                    >
+                      +1 Frame <ChevronRight size={16} />
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleRestart}
+                    className="btn-action"
+                    style={{ padding: '8px 16px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    <RotateCcw size={14} /> Replay Delivery
+                  </button>
                 </div>
               </div>
             </div>

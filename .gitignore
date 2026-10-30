@@ -29,4 +29,3 @@ Video_sam/
 # Large AI model files
 weights/*
 !weights/*.pt
-!weights/*.onnx

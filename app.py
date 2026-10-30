@@ -417,6 +417,7 @@ def upload_video():
                 final_data = {
                     "status": "success",
                     "video_url": f"/uploads/{output_filename}",
+                    "original_video_url": f"/uploads/{file.filename}",
                     "detected_speed": float(result["speed"]),
                     "max_speed": max_speed,
                     "ball_status": result["status"],
