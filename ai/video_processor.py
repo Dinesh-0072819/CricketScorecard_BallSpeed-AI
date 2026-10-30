@@ -151,13 +151,14 @@ class VideoProcessor:
             cap.release()
             return {"speed": 0.0, "status": "ERROR"}
 
-        # Initialize tracking, speed, and alarm modules
-        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
+        # Initialize tracking, speed, and alarm modules (adapted confidence thresholds for night/floodlight turfs)
+        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.20, low_threshold=0.08)
         estimator = SpeedEstimator(fps=fps, max_speed_limit=max_speed)
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
         maximum_speed = 0.0
+        peak_instant_speed = 0.0
         status = "SAFE"
         frame_number = 0
         raw_frame_number = 0
@@ -166,6 +167,7 @@ class VideoProcessor:
         delivery_finished = False
         flight_frames = 0
         trajectory_points = []
+        delivery_trajectory_points = []
 
         while True:
             ret, frame = cap.read()
@@ -181,16 +183,8 @@ class VideoProcessor:
 
             annotated = frame.copy()
 
-            # ---------------- FAST DELIVERY SCANNING ----------------
-            # Run DNN every 3rd frame during run-up & post-shot follow through
-            # Run DNN on EVERY frame (1x) during active delivery flight for maximum velocity accuracy
+            # Continuous OpenCV DNN inference across all frames ensures both daytime and night floodlight deliveries are reliably tracked
             run_detection = True
-            if not delivery_active and not delivery_finished:
-                if raw_frame_number % 3 != 0:
-                    run_detection = False
-            elif delivery_finished:
-                if raw_frame_number % 3 != 0:
-                    run_detection = False
 
             # ---------------- BALL DETECTION (OpenCV DNN / PyTorch) ----------------
             detections = []
@@ -202,7 +196,7 @@ class VideoProcessor:
                     self.net.setInput(blob)
                     preds = self.net.forward()[0].T
 
-                    mask = preds[:, 4] >= 0.15
+                    mask = preds[:, 4] >= 0.08
                     valid_preds = preds[mask]
                     if len(valid_preds) > 0:
                         cxs, cys, bws, bhs = valid_preds[:, 0], valid_preds[:, 1], valid_preds[:, 2], valid_preds[:, 3]
@@ -214,7 +208,7 @@ class VideoProcessor:
                         ], axis=1).astype(int).tolist()
                         confs = valid_preds[:, 4].tolist()
 
-                        indices = cv2.dnn.NMSBoxes(boxes, confs, 0.15, 0.40)
+                        indices = cv2.dnn.NMSBoxes(boxes, confs, 0.08, 0.40)
                         for idx in indices:
                             b = boxes[idx]
                             detections.append((b[0] + b[2] // 2, b[1] + b[3] // 2))
@@ -223,7 +217,7 @@ class VideoProcessor:
                     predict_kwargs = {
                         "source": frame,
                         "imgsz": 640,
-                        "conf": 0.15,  # Fetch lower-confidence items for ByteTrack
+                        "conf": 0.08,  # Fetch lower-confidence items for ByteTrack
                         "iou": 0.40,
                         "verbose": False
                     }
@@ -251,8 +245,24 @@ class VideoProcessor:
             current_center = None
 
             if active_tracks:
-                # Track the first active object (assuming primary cricket ball)
-                primary_track = active_tracks[0]
+                # Select the delivery ball track (preferring track with forward delivery motion towards batsman)
+                best_candidate = None
+                best_metric = -1.0
+                for tr in active_tracks:
+                    score = tr.score
+                    if len(tr.smoothed_history) >= 2:
+                        p1 = tr.smoothed_history[-2]
+                        p2 = tr.smoothed_history[-1]
+                        dy = p2[1] - p1[1]
+                        dx = p2[0] - p1[0]
+                        spd = math.sqrt(dx * dx + dy * dy) * 0.025 * fps * 3.6
+                        if dy > 0 and 15.0 <= spd <= 180.0:
+                            score += 10.0 + (spd / 10.0)
+                    if score > best_metric:
+                        best_metric = score
+                        best_candidate = tr
+                primary_track = best_candidate if best_candidate else active_tracks[0]
+
                 # Get the smoothed tracking coordinate from Kalman Filter history
                 raw_center = primary_track.history[-1]
                 smoothed_center = primary_track.smoothed_history[-1]
@@ -291,10 +301,21 @@ class VideoProcessor:
                     p1 = primary_track.smoothed_history[-2]
                     p2 = primary_track.smoothed_history[-1]
                     
-                    # Compute instantaneous speed (meters using H matrix ↔️ pixels fallback)
+                    # Compute instantaneous speed strictly as per Section 6 principle
                     instant_speed, pixel_dist = estimator.calculate_speed(p1, p2, self.H)
                     
-                    # Validate and smooth speed using moving average
+                    # Step 5: Peak selection - track maximum instantaneous velocity
+                    if pixel_dist < 120.0 and 15.0 <= instant_speed <= 180.0:
+                        if instant_speed > peak_instant_speed:
+                            peak_instant_speed = instant_speed
+                            if instant_speed >= 30.0 and not delivery_active:
+                                delivery_active = True
+                                delivery_finished = False
+
+                        if not delivery_active and not delivery_finished and instant_speed >= 30.0:
+                            delivery_active = True
+
+                    # Validate and smooth speed for radar HUD display
                     detected_speed, valid = estimator.validate_and_smooth(
                         instant_speed, pixel_dist, detected_speed
                     )
@@ -304,7 +325,16 @@ class VideoProcessor:
 
             if delivery_active:
                 flight_frames += 1
-                if flight_frames > 20 and detected_speed < maximum_speed * 0.40:
+                if current_center:
+                    delivery_trajectory_points.append(current_center)
+
+                # Check if ball has finished delivery flight (passed batsman, bat contact, or rebound)
+                if len(delivery_trajectory_points) >= 2:
+                    dy_step = delivery_trajectory_points[-1][1] - delivery_trajectory_points[-2][1]
+                    if dy_step < -5.0:  # Bat contact or reversal
+                        delivery_active = False
+                        delivery_finished = True
+                elif flight_frames > 25 and detected_speed < maximum_speed * 0.35:
                     delivery_active = False
                     delivery_finished = True
 
@@ -323,6 +353,7 @@ class VideoProcessor:
                     pt2 = (int(trail[i][0]), int(trail[i][1]))
                     cv2.line(annotated, pt1, pt2, (255, 255, 0), thickness)
 
+            # Record peak smoothed velocity
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
 
@@ -440,8 +471,9 @@ class VideoProcessor:
 
         # Analyze complete delivery trajectory for Angle of Deviation, Swing, and Turn
         from ai.delivery_analysis import analyze_delivery
+        pts_to_analyze = delivery_trajectory_points if len(delivery_trajectory_points) >= 4 else trajectory_points
         analysis = analyze_delivery(
-            trajectory_points,
+            pts_to_analyze,
             fps=fps,
             pixel_to_meter=0.025,
             speed_kmh=maximum_speed

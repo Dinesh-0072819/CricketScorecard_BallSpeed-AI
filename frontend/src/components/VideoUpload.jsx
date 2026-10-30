@@ -113,16 +113,21 @@ export default function VideoUpload() {
       }, 1000);
     };
 
-    // Track live upload progress percentage
+    const uploadStartTime = Date.now();
+    // Track live upload progress percentage, transfer rate and remaining time
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         const percent = Math.round((event.loaded / event.total) * 100);
         setUploadProgress(percent);
         const loadedMB = (event.loaded / (1024 * 1024)).toFixed(1);
         const totalMB = (event.total / (1024 * 1024)).toFixed(1);
+        const elapsedSec = (Date.now() - uploadStartTime) / 1000;
+        const speedMBps = elapsedSec > 0.1 ? ((event.loaded / (1024 * 1024)) / elapsedSec).toFixed(1) : '2.0';
+        const remainingMB = Math.max(0, (event.total - event.loaded) / (1024 * 1024));
+        const etaSec = parseFloat(speedMBps) > 0 ? Math.ceil(remainingMB / parseFloat(speedMBps)) : 1;
 
         if (percent < 100) {
-          setStatusDetails(`Uploading video payload: ${loadedMB} MB / ${totalMB} MB (${percent}%)`);
+          setStatusDetails(`Uploading: ${loadedMB} MB / ${totalMB} MB (${percent}%) • ⚡ ${speedMBps} MB/s • ETA: ${etaSec}s`);
         } else {
           startProcessingPoll();
         }

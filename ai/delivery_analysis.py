@@ -58,10 +58,15 @@ def analyze_delivery(
     if n < 4:
         return fallback
 
-    # Check for bat impact / rebound (sharp angle reversal > 75 degrees)
-    # and truncate trajectory to the delivery flight
+    # Check for bat impact, rebound or reversal (ball moving backward: dy < -6.0)
     truncated_end = n
-    for i in range(max(3, int(n * 0.4)), n - 1):
+    for i in range(4, n):
+        if pts[i, 1] < pts[i - 1, 1] - 6.0:
+            truncated_end = i
+            break
+
+    # Also check sharp angle reversal > 75 degrees
+    for i in range(max(3, int(n * 0.4)), min(truncated_end, n - 1)):
         v1 = pts[i] - pts[i - 2]
         v2 = pts[i + 1] - pts[i]
         l1, l2 = np.linalg.norm(v1), np.linalg.norm(v2)
@@ -69,18 +74,27 @@ def analyze_delivery(
             dot = np.clip(np.dot(v1, v2) / (l1 * l2), -1.0, 1.0)
             angle = np.degrees(np.arccos(dot))
             if angle > 75.0:  # Bat contact or sharp rebound
-                truncated_end = i + 1
+                truncated_end = min(truncated_end, i + 1)
                 break
 
     pts = pts[:truncated_end]
+
+    # Remove stationary points (e.g. bowler holding ball before delivery or keeper holding ball)
+    if len(pts) > 0:
+        moving_pts = [pts[0]]
+        for i in range(1, len(pts)):
+            if np.linalg.norm(pts[i] - moving_pts[-1]) >= 1.5:
+                moving_pts.append(pts[i])
+        pts = np.array(moving_pts, dtype=np.float64)
+
     n = len(pts)
 
     if n < 4:
         return fallback
 
     # 1. Detect bounce / inflection point
-    # Look for greatest angular turn between 1.5° and 45°
-    start_search = max(2, int(n * 0.15))
+    # Cricket pitch bounce occurs in landing zone (25% to 85% of delivery flight)
+    start_search = max(3, int(n * 0.25))
     end_search = min(n - 2, int(n * 0.85))
 
     bounce_idx = None
@@ -96,7 +110,7 @@ def analyze_delivery(
             a_post = np.degrees(np.arctan2(post_vec[0], post_vec[1]))
             diff = (a_post - a_pre + 180) % 360 - 180
             abs_diff = abs(diff)
-            # Standard cricket spin turn off pitch is between 1.0° and 30°
+            # Standard cricket spin turn off pitch is between 1.0° and 35°
             if 1.0 <= abs_diff <= 35.0 and abs_diff > best_turn:
                 best_turn = abs_diff
                 turn_signed = diff
@@ -105,7 +119,7 @@ def analyze_delivery(
     deviation_angle_deg = round(best_turn, 1)
 
     # 2. Aerodynamic Air Swing (deviation from release chord)
-    pre_segment = pts[:bounce_idx + 1] if bounce_idx else pts
+    pre_segment = pts[:bounce_idx + 1] if (bounce_idx and bounce_idx >= 4) else pts
     p_start = pre_segment[0]
     p_end = pre_segment[-1]
     chord_vec = p_end - p_start
@@ -113,9 +127,9 @@ def analyze_delivery(
 
     swing_cm = 0.0
     swing_type = "NONE"
-    if chord_len > 12.0 and len(pre_segment) >= 4:
+    if chord_len > 10.0 and len(pre_segment) >= 3:
         chord_u = chord_vec / chord_len
-        # Perpendicular unit normal
+        # Perpendicular unit normal (pointing inward to RHB)
         norm_u = np.array([-chord_u[1], chord_u[0]])
         max_dev_px = 0.0
 
@@ -125,7 +139,7 @@ def analyze_delivery(
                 max_dev_px = d
 
         swing_cm = round(abs(max_dev_px) * pixel_to_meter * 100.0, 1)
-        if swing_cm >= 2.0:
+        if swing_cm >= 1.5:
             if max_dev_px > 0:
                 swing_type = "INSWING" if hand == "RIGHT" else "OUTSWING"
             else:
@@ -141,7 +155,7 @@ def analyze_delivery(
         spin_type = "LEG_SPIN"
         turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
     elif deviation_angle_deg >= 1.2:
-        if turn_signed > 0:
+        if turn_signed < 0:
             turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
             spin_type = "OFF_SPIN"
         else:
