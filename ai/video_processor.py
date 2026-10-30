@@ -197,13 +197,16 @@ class VideoProcessor:
                             detections.append((cx, cy))
                             scores.append(conf)
                         used_cloud = True
-                    elif not self.roboflow_warned:
-                        print(f"Roboflow Cloud notice (HTTP {res.status_code}): Using high-precision local YOLO engine.")
-                        self.roboflow_warned = True
+                    else:
+                        if not self.roboflow_warned:
+                            print(f"Roboflow Cloud notice (HTTP {res.status_code}): Switching to high-speed local YOLO engine.")
+                            self.roboflow_warned = True
+                        self.use_roboflow = False
                 except Exception as rf_err:
                     if not self.roboflow_warned:
-                        print(f"Roboflow Cloud connection note: {rf_err}. Using local YOLO engine.")
+                        print(f"Roboflow Cloud connection note: {rf_err}. Switching to high-speed local YOLO engine.")
                         self.roboflow_warned = True
+                    self.use_roboflow = False
 
             # ---------------- LOCAL YOLO BALL DETECTION (FALLBACK / DEFAULT) ----------------
             if not used_cloud:
