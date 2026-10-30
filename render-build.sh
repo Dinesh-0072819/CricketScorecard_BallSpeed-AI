@@ -15,7 +15,7 @@ pip install --no-cache-dir torch torchvision --index-url https://download.pytorc
 
 # 3. Install remaining Python backend dependencies
 echo "Installing Python dependencies..."
-pip install --no-cache-dir -r requirements.txt
+pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 # 4. Build Vite React frontend
 echo "Building React SPA frontend..."
