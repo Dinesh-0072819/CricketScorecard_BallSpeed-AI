@@ -104,28 +104,6 @@ def analyze_delivery(
 
     deviation_angle_deg = round(best_turn, 1)
 
-    # Determine turn direction
-    if deviation_angle_deg >= 1.2:
-        if turn_signed > 0:
-            # Deviating to the right
-            if hand == "RIGHT":
-                turn_direction = "Off Break (Turns Inward to RHB)"
-                spin_type = "OFF_SPIN"
-            else:
-                turn_direction = "Leg Break (Turns Away from LHB)"
-                spin_type = "LEG_SPIN"
-        else:
-            # Deviating to the left
-            if hand == "RIGHT":
-                turn_direction = "Leg Break (Turns Away from RHB)"
-                spin_type = "LEG_SPIN"
-            else:
-                turn_direction = "Off Break (Turns Inward to LHB)"
-                spin_type = "OFF_SPIN"
-    else:
-        turn_direction = "Straight Line"
-        spin_type = "NONE"
-
     # 2. Aerodynamic Air Swing (deviation from release chord)
     pre_segment = pts[:bounce_idx + 1] if bounce_idx else pts
     p_start = pre_segment[0]
@@ -147,19 +125,53 @@ def analyze_delivery(
                 max_dev_px = d
 
         swing_cm = round(abs(max_dev_px) * pixel_to_meter * 100.0, 1)
-        if swing_cm >= 3.5:
+        if swing_cm >= 2.0:
             if max_dev_px > 0:
                 swing_type = "INSWING" if hand == "RIGHT" else "OUTSWING"
             else:
                 swing_type = "OUTSWING" if hand == "RIGHT" else "INSWING"
 
+    # Synchronize turn and swing direction:
+    # An inswinging/inward delivery to RHB is Off-break/Off-spin (never Leg-spin).
+    # An outswinging/outward delivery to RHB is Leg-break/Leg-spin (never Off-spin).
+    if swing_type == "INSWING":
+        spin_type = "OFF_SPIN"
+        turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
+    elif swing_type == "OUTSWING":
+        spin_type = "LEG_SPIN"
+        turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
+    elif deviation_angle_deg >= 1.2:
+        if turn_signed > 0:
+            turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
+            spin_type = "OFF_SPIN"
+        else:
+            turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
+            spin_type = "LEG_SPIN"
+    else:
+        turn_direction = "Straight Line"
+        spin_type = "NONE"
+
     # 3. Delivery Classification
+    # Ball is Inswing and speed <= 110 km/h -> classified as OFF_SPIN
+    # Ball is Inswing and speed > 110 km/h -> classified as INSWING
     measured_speed = speed_kmh if speed_kmh and speed_kmh > 0 else 80.0
 
-    if deviation_angle_deg >= 1.5 and measured_speed <= 110.0:
-        delivery_type = spin_type
-    elif swing_cm >= 4.0 and swing_type != "NONE":
-        delivery_type = swing_type
+    if spin_type == "OFF_SPIN" or swing_type == "INSWING":
+        if measured_speed <= 110.0:
+            delivery_type = "OFF_SPIN"
+            spin_type = "OFF_SPIN"
+            turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
+        else:
+            delivery_type = "INSWING"
+            turn_direction = "Inswing (Shapes Inward to RHB)" if hand == "RIGHT" else "Outswing (Shapes Away from LHB)"
+    elif spin_type == "LEG_SPIN" or swing_type == "OUTSWING":
+        if measured_speed <= 110.0:
+            delivery_type = "LEG_SPIN"
+            spin_type = "LEG_SPIN"
+            turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
+        else:
+            delivery_type = "OUTSWING"
+            turn_direction = "Outswing (Shapes Away from RHB)" if hand == "RIGHT" else "Inswing (Shapes Inward to LHB)"
     elif deviation_angle_deg >= 1.5:
         delivery_type = spin_type
     else:

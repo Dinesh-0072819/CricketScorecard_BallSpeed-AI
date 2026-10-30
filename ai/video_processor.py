@@ -278,25 +278,6 @@ class VideoProcessor:
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
 
-            # Early delivery completion:
-            # 1. Ball reached batsman at baseline/bottom of pitch after bowling release
-            if ball_found and maximum_speed > 30.0 and current_center[1] > int(height * 0.80) and len(trajectory_points) >= 8:
-                print(f"Delivery completed at frame {raw_frame_number}! Ball reached batsman crease (y={current_center[1]}).")
-                break
-
-            # 2. Ball reached bowling velocity and decelerated/stopped at batsman:
-            if maximum_speed > 25.0:
-                if detected_speed < maximum_speed * 0.50 or detected_speed == 0.0:
-                    slow_frames += 1
-                    if slow_frames >= 4:
-                        print(f"Delivery completed at frame {raw_frame_number}! Ball reached batsman and decelerated to {detected_speed:.1f} km/h.")
-                        break
-                else:
-                    slow_frames = 0
-            elif raw_frame_number - last_ball_frame > 30 and len(trajectory_points) >= 10:
-                print(f"Ball delivery track completed at frame {raw_frame_number}.")
-                break
-
             # ---------------- ALARM CONTROL ----------------
             status, status_color = alarm.check(maximum_speed)
 
