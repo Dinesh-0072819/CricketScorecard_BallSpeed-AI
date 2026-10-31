@@ -30,7 +30,7 @@ def analyze_delivery(
         "confidence": 0.0
     }
 
-    if not trajectory_points or len(trajectory_points) < 4:
+    if trajectory_points is None or len(trajectory_points) < 4:
         return fallback
 
     # Extract clean (px, py) float coordinates
@@ -58,15 +58,9 @@ def analyze_delivery(
     if n < 4:
         return fallback
 
-    # Check for bat impact, rebound or reversal (ball moving backward: dy < -6.0)
+    # Check for bat impact, rebound or sharp angle reversal > 75 degrees
     truncated_end = n
-    for i in range(4, n):
-        if pts[i, 1] < pts[i - 1, 1] - 6.0:
-            truncated_end = i
-            break
-
-    # Also check sharp angle reversal > 75 degrees
-    for i in range(max(3, int(n * 0.4)), min(truncated_end, n - 1)):
+    for i in range(max(3, int(n * 0.3)), n - 1):
         v1 = pts[i] - pts[i - 2]
         v2 = pts[i + 1] - pts[i]
         l1, l2 = np.linalg.norm(v1), np.linalg.norm(v2)
@@ -74,10 +68,27 @@ def analyze_delivery(
             dot = np.clip(np.dot(v1, v2) / (l1 * l2), -1.0, 1.0)
             angle = np.degrees(np.arccos(dot))
             if angle > 75.0:  # Bat contact or sharp rebound
-                truncated_end = min(truncated_end, i + 1)
+                truncated_end = i + 1
                 break
 
     pts = pts[:truncated_end]
+
+    # Isolate delivery release point: remove pre-release bowler windup moving opposite to main flight
+    if len(pts) >= 6:
+        main_dir = pts[-1] - pts[len(pts) // 2]
+        main_len = np.linalg.norm(main_dir)
+        if main_len > 10.0:
+            main_u = main_dir / main_len
+            start_idx = 0
+            for i in range(len(pts) - 4):
+                step_dir = pts[i + 1] - pts[i]
+                step_len = np.linalg.norm(step_dir)
+                if step_len > 1.0:
+                    proj = np.dot(step_dir / step_len, main_u)
+                    if proj > 0.4:
+                        start_idx = i
+                        break
+            pts = pts[start_idx:]
 
     # Remove stationary points (e.g. bowler holding ball before delivery or keeper holding ball)
     if len(pts) > 0:
@@ -195,12 +206,12 @@ def analyze_delivery(
 
     return {
         "status": "ok",
-        "deviation_angle_deg": deviation_angle_deg,
-        "turn_angle_deg": deviation_angle_deg,
+        "deviation_angle_deg": float(deviation_angle_deg),
+        "turn_angle_deg": float(deviation_angle_deg),
         "turn_direction": turn_direction,
-        "swing_cm": swing_cm,
+        "swing_cm": float(swing_cm),
         "delivery_type": delivery_type,
         "spin_type": spin_type,
         "swing_type": swing_type,
-        "confidence": confidence
+        "confidence": float(confidence)
     }

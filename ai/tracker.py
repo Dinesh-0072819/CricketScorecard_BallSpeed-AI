@@ -121,7 +121,7 @@ class ByteTracker:
     """
     ByteTrack logic tailored for tracking a cricket ball.
     """
-    def __init__(self, dt=1.0/30.0, high_threshold=0.20, low_threshold=0.12, max_lost_frames=15):
+    def __init__(self, dt=1.0/30.0, high_threshold=0.35, low_threshold=0.15, max_lost_frames=15):
         self.dt = dt
         self.high_threshold = high_threshold
         self.low_threshold = low_threshold

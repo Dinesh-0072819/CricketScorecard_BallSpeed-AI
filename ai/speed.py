@@ -63,11 +63,13 @@ class SpeedEstimator:
 
     def validate_and_smooth(self, instant_speed, pixel_distance, current_smoothed_speed):
         """
-        Validate and smooth speed to prevent spikes.
+        Validate and smooth speed to prevent single-frame noise spikes.
+        Calculates purely based on genuine physical ball velocity for all delivery types
+        (e.g. spin at 60 km/h, medium pace at 84 km/h, fast bowling at 100-140 km/h).
         """
-        if pixel_distance < self.max_pixel_jump and instant_speed < 180.0:
-            if current_smoothed_speed < 15.0 and instant_speed > 35.0:
-                smoothed_speed = instant_speed * 0.72
+        if pixel_distance < self.max_pixel_jump and 10.0 <= instant_speed <= 180.0:
+            if current_smoothed_speed <= 0.0 or current_smoothed_speed < 10.0:
+                smoothed_speed = instant_speed
             else:
                 smoothed_speed = (
                     current_smoothed_speed * self.smoothing_factor +

@@ -180,13 +180,12 @@ class VideoProcessor:
             cap.release()
             return {"speed": 0.0, "status": "ERROR"}
 
-        # Adaptive scale based on camera orientation / geometry:
-        # Landscape 720p (pitch spans ~400-500px diagonal): scale ~0.0237 gives accurate ~94.2 km/h
-        # Portrait 1080/1280p (pitch spans ~600-800px vertical): scale ~0.0214 gives accurate ~94.6 km/h
-        pitch_scale = 0.0237 if height <= 720 else 0.0214
-        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.20, low_threshold=0.12)
+        # Standard physical pixel-to-meter ratio (22-yard pitch fallback = 0.025 m/px)
+        # Perspective matrix H is automatically used when ground calibration is active.
+        pitch_scale = 0.025
+        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.35, low_threshold=0.15)
         estimator = SpeedEstimator(fps=fps, pixel_to_meter=pitch_scale, max_speed_limit=max_speed)
-        estimator.smoothing_factor = 0.70
+        estimator.smoothing_factor = 0.75
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
@@ -196,6 +195,9 @@ class VideoProcessor:
         raw_frame_number = 0
         last_ball_frame = 0
         trajectory_points = []
+        current_delivery_points = []
+        current_burst_max_speed = 0.0
+        delivery_bursts = []
         track_history = {}
         track_smoothed = {}
         track_max_speed = {}
@@ -429,6 +431,20 @@ class VideoProcessor:
             if detected_speed > maximum_speed:
                 maximum_speed = detected_speed
 
+            # Collect continuous delivery flight points during delivery movement
+            if ball_found and current_center is not None and detected_speed >= 25.0:
+                current_delivery_points.append(current_center)
+                if detected_speed > current_burst_max_speed:
+                    current_burst_max_speed = detected_speed
+            else:
+                if len(current_delivery_points) >= 5 and current_burst_max_speed >= 30.0:
+                    delivery_bursts.append({
+                        "max_speed": current_burst_max_speed,
+                        "points": list(current_delivery_points)
+                    })
+                current_delivery_points = []
+                current_burst_max_speed = 0.0
+
             # ---------------- ALARM CONTROL ----------------
             status, status_color = alarm.check(maximum_speed)
 
@@ -541,24 +557,22 @@ class VideoProcessor:
             except Exception:
                 pass
 
-        # Identify primary delivery track (high displacement + delivery speed)
-        best_tid = None
-        best_del_speed = 0.0
-        for tid, pts in track_history.items():
-            if len(pts) >= 6:
-                disp = ((pts[-1][0]-pts[0][0])**2 + (pts[-1][1]-pts[0][1])**2)**0.5
-                if disp > 25.0:
-                    spd = track_max_speed.get(tid, 0.0)
-                    if spd > best_del_speed:
-                        best_del_speed = spd
-                        best_tid = tid
+        # Select genuine delivery flight trajectory points
+        if len(current_delivery_points) >= 5 and current_burst_max_speed >= 30.0:
+            delivery_bursts.append({
+                "max_speed": current_burst_max_speed,
+                "points": list(current_delivery_points)
+            })
 
-        if best_tid and len(track_history[best_tid]) >= 4:
-            pts_to_analyze = track_history[best_tid]
-            if best_del_speed > maximum_speed:
-                maximum_speed = best_del_speed
-        else:
+        if delivery_bursts:
+            best_burst = max(delivery_bursts, key=lambda b: b["max_speed"])
+            pts_to_analyze = best_burst["points"]
+            if best_burst["max_speed"] > maximum_speed:
+                maximum_speed = best_burst["max_speed"]
+        elif trajectory_points:
             pts_to_analyze = trajectory_points
+        else:
+            pts_to_analyze = []
 
         # Analyze complete delivery trajectory for Angle of Deviation, Swing, and Turn
         from ai.delivery_analysis import analyze_delivery
