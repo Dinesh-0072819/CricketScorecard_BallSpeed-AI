@@ -90,19 +90,25 @@ def health():
 @app.route("/api/engine_status", methods=["GET"])
 def engine_status():
     use_rf = os.getenv("USE_ROBOFLOW_CLOUD", "").lower().strip() == "true"
-    api_key = os.getenv("ROBOFLOW_API_KEY", "")
-    project = os.getenv("ROBOFLOW_PROJECT", "")
+    api_key = os.getenv("ROBOFLOW_API_KEY", "").strip()
+    project = os.getenv("ROBOFLOW_PROJECT", "").strip()
+    workspace = os.getenv("ROBOFLOW_WORKSPACE", "").strip()
     
     test_result = "not tested"
-    if api_key and project:
+    accessible_models = []
+    if api_key:
         try:
             import requests
-            clean_proj = project.strip()
-            if "/" not in clean_proj:
-                clean_proj = f"{clean_proj}/1"
-            test_url = f"https://detect.roboflow.com/{clean_proj}?api_key={api_key.strip()}"
-            r = requests.get(test_url, timeout=4)
-            test_result = f"HTTP {r.status_code}: {r.text[:100]}"
+            # Query Roboflow API to check accessible workspaces and projects
+            url = f"https://api.roboflow.com/{workspace or ''}?api_key={api_key}" if workspace else f"https://api.roboflow.com/?api_key={api_key}"
+            r = requests.get(url, timeout=4)
+            if r.status_code == 200:
+                data = r.json()
+                test_result = f"Connected! Workspace: {data.get('workspace', {}).get('name', 'OK')}"
+                projects = data.get("workspace", {}).get("projects", [])
+                accessible_models = [p.get("id") for p in projects]
+            else:
+                test_result = f"HTTP {r.status_code}: {r.text[:120]}"
         except Exception as e:
             test_result = str(e)
             
@@ -111,9 +117,11 @@ def engine_status():
         "has_api_key": bool(api_key),
         "api_key_masked": (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 8 else ("SET" if api_key else "EMPTY"),
         "project": project,
+        "workspace": workspace,
+        "accessible_models": accessible_models,
         "processor_roboflow_active": getattr(video_processor, "use_roboflow", False),
         "processor_status": getattr(video_processor, "roboflow_status_msg", "N/A"),
-        "roboflow_ping": test_result
+        "roboflow_workspace_check": test_result
     })
 
 # Live Camera Tracking States
