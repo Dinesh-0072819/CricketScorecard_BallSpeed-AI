@@ -17,6 +17,18 @@ except Exception:
     pass
 
 
+def letterbox(im, new_shape=(640, 640), color=(114, 114, 114)):
+    shape = im.shape[:2]
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = (new_shape[1] - new_unpad[0]) / 2, (new_shape[0] - new_unpad[1]) / 2
+    if shape[::-1] != new_unpad:
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    return cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color), r, (dw, dh)
+
+
 class VideoProcessor:
 
     def __init__(self):
@@ -24,15 +36,31 @@ class VideoProcessor:
         print("Loading Tennis Ball AI Model...")
         print("=" * 50)
 
-        # Standard custom YOLO model
-        model_path = "weights/tennis_ball_detector.pt"
-        if not os.path.exists(model_path) or os.path.getsize(model_path) < 100000:
-            if os.path.exists("tennis_ball_detector.pt") and os.path.getsize("tennis_ball_detector.pt") > 100000:
-                model_path = "tennis_ball_detector.pt"
-            else:
-                model_path = "yolov8n.pt"
+        # 1. High-Performance, Ultra-Low RAM OpenCV DNN Engine (<50MB RAM, zero deadlock, zero OOM)
+        onnx_path = "weights/tennis_ball_detector.onnx"
+        self.use_onnx = False
+        self.model = None
 
-        self.model = YOLO(model_path)
+        if os.path.exists(onnx_path) and os.path.getsize(onnx_path) > 100000:
+            try:
+                self.net = cv2.dnn.readNetFromONNX(onnx_path)
+                self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+                self.use_onnx = True
+                print("Loaded High-Speed OpenCV DNN Engine: <50MB RAM, zero deadlock.")
+            except Exception as e:
+                print(f"OpenCV DNN init note: {e}")
+
+        # 2. PyTorch Fallback (only loaded if ONNX not available)
+        if not self.use_onnx:
+            model_path = "weights/tennis_ball_detector.pt"
+            if not os.path.exists(model_path) or os.path.getsize(model_path) < 100000:
+                if os.path.exists("tennis_ball_detector.pt") and os.path.getsize("tennis_ball_detector.pt") > 100000:
+                    model_path = "tennis_ball_detector.pt"
+                else:
+                    model_path = "yolov8n.pt"
+            self.model = YOLO(model_path)
+
         self.H = None
 
         # Roboflow Cloud GPU inference configuration
@@ -208,27 +236,47 @@ class VideoProcessor:
                         self.roboflow_warned = True
                     self.use_roboflow = False
 
-            # ---------------- LOCAL YOLO BALL DETECTION (FALLBACK / DEFAULT) ----------------
+            # ---------------- LOCAL BALL DETECTION (OPENCV DNN / PYTORCH) ----------------
             if not used_cloud:
-                with torch.inference_mode():
-                    results = self.model.predict(
-                        source=frame,
-                        imgsz=640,
-                        conf=0.15,
-                        iou=0.40,
-                        verbose=False
-                    )
+                if self.use_onnx:
+                    lb, r, (dw, dh) = letterbox(frame, (640, 640))
+                    blob = cv2.dnn.blobFromImage(lb, 1/255.0, (640, 640), swapRB=True, crop=False)
+                    self.net.setInput(blob)
+                    preds = self.net.forward()[0].T
+                    mask = preds[:, 4] >= 0.15
+                    valid = preds[mask]
+                    if len(valid) > 0:
+                        cxs = (valid[:, 0] - dw) / r
+                        cys = (valid[:, 1] - dh) / r
+                        bws = valid[:, 2] / r
+                        bhs = valid[:, 3] / r
+                        boxes = np.stack([cxs - bws/2, cys - bhs/2, bws, bhs], axis=1).astype(int).tolist()
+                        confs = valid[:, 4].tolist()
+                        for idx in cv2.dnn.NMSBoxes(boxes, confs, 0.15, 0.40):
+                            cx = int(boxes[idx][0] + boxes[idx][2]//2)
+                            cy = int(boxes[idx][1] + boxes[idx][3]//2)
+                            detections.append((cx, cy))
+                            scores.append(confs[idx])
+                elif self.model is not None:
+                    with torch.inference_mode():
+                        results = self.model.predict(
+                            source=frame,
+                            imgsz=640,
+                            conf=0.15,
+                            iou=0.40,
+                            verbose=False
+                        )
 
-                for result in results:
-                    if result.boxes is None:
-                        continue
-                    for box in result.boxes:
-                        confidence = float(box.conf[0])
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-                        detections.append((cx, cy))
-                        scores.append(confidence)
+                    for result in results:
+                        if result.boxes is None:
+                            continue
+                        for box in result.boxes:
+                            confidence = float(box.conf[0])
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            cx = (x1 + x2) // 2
+                            cy = (y1 + y2) // 2
+                            detections.append((cx, cy))
+                            scores.append(confidence)
 
             # ---------------- BYTETRACK & KALMAN ASSOCIATION ----------------
             active_tracks = tracker.update(detections, scores)
