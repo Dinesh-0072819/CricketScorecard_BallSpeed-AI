@@ -217,7 +217,7 @@ class VideoProcessor:
                 "Authorization": f"Bearer {self.roboflow_api_key.strip()}"
             }
 
-            step = 2 if fps > 40.0 else 1
+            step = 2 if (fps > 45.0 and total_frames > 150) else 1
             frames_to_query = []
             f_idx = 0
             while True:
@@ -295,10 +295,12 @@ class VideoProcessor:
                 dets, scs = cloud_detections.get(raw_frame_number - 1, ([], []))
                 detections = list(dets)
                 scores = list(scs)
-                used_cloud = True
+                if len(detections) > 0:
+                    used_cloud = True
 
             # ---------------- LOCAL BALL DETECTION (OPENCV DNN / PYTORCH) ----------------
-            if not used_cloud:
+            # Fallback to local ONNX/YOLO whenever cloud didn't detect the ball or skipped frame
+            if not used_cloud or len(detections) == 0:
                 if self.use_onnx:
                     lb, r, (dw, dh) = letterbox(frame, (640, 640))
                     blob = cv2.dnn.blobFromImage(lb, 1/255.0, (640, 640), swapRB=True, crop=False)
@@ -428,12 +430,12 @@ class VideoProcessor:
                 maximum_speed = detected_speed
 
             # Collect continuous delivery flight points during delivery movement
-            if ball_found and current_center is not None and detected_speed >= 25.0:
+            if ball_found and current_center is not None and detected_speed >= 15.0:
                 current_delivery_points.append(current_center)
                 if detected_speed > current_burst_max_speed:
                     current_burst_max_speed = detected_speed
             else:
-                if len(current_delivery_points) >= 5 and current_burst_max_speed >= 30.0:
+                if len(current_delivery_points) >= 4 and current_burst_max_speed >= 18.0:
                     delivery_bursts.append({
                         "max_speed": current_burst_max_speed,
                         "points": list(current_delivery_points)
@@ -520,8 +522,10 @@ class VideoProcessor:
         try:
             result = subprocess.run(
                 command,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                timeout=25.0
             )
 
             # Fallback encoder if primary failed
@@ -539,22 +543,36 @@ class VideoProcessor:
                     "-an",
                     output_video
                 ]
-                subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(
+                    fallback_cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=25.0
+                )
         except Exception as enc_err:
             print(f"FFmpeg encoding note: {enc_err}")
 
-        # Ensure output video exists (fallback copy if ffmpeg not installed or errored)
-        if not os.path.exists(output_video) and os.path.exists(temp_output):
-            shutil.copy(temp_output, output_video)
+        # Ensure output video exists and is non-empty (fallback copy if ffmpeg failed or timed out)
+        output_valid = os.path.exists(output_video) and os.path.getsize(output_video) > 1024
+        if not output_valid and os.path.exists(temp_output):
+            print("Encoding notice: copying raw overlay video to output...")
+            try:
+                shutil.copy(temp_output, output_video)
+            except Exception as cp_err:
+                print(f"Copy error: {cp_err}")
 
-        if os.path.exists(temp_output) and os.path.exists(output_video):
+        if os.path.exists(temp_output) and os.path.exists(output_video) and os.path.getsize(output_video) > 1024:
             try:
                 os.remove(temp_output)
             except Exception:
                 pass
 
+        if progress_callback:
+            progress_callback(97, frame_number, total_frames, "Analyzing trajectory & spin dynamics...")
+
         # Select genuine delivery flight trajectory points
-        if len(current_delivery_points) >= 5 and current_burst_max_speed >= 30.0:
+        if len(current_delivery_points) >= 4 and current_burst_max_speed >= 18.0:
             delivery_bursts.append({
                 "max_speed": current_burst_max_speed,
                 "points": list(current_delivery_points)

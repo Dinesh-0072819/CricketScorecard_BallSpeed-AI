@@ -104,8 +104,8 @@ def analyze_delivery(
         return fallback
 
     # 1. Detect bounce / inflection point
-    # Cricket pitch bounce occurs in landing zone (25% to 85% of delivery flight)
-    start_search = max(3, int(n * 0.25))
+    # Cricket pitch bounce occurs in landing zone (20% to 85% of delivery flight)
+    start_search = max(2, int(n * 0.20))
     end_search = min(n - 2, int(n * 0.85))
 
     bounce_idx = None
@@ -129,8 +129,12 @@ def analyze_delivery(
 
     deviation_angle_deg = round(best_turn, 1)
 
-    # 2. Aerodynamic Air Swing (deviation from release chord)
-    pre_segment = pts[:bounce_idx + 1] if (bounce_idx and bounce_idx >= 4) else pts
+    # 2. Aerodynamic Air Swing / Drift (strictly BEFORE bounce)
+    if bounce_idx is not None and bounce_idx >= 2:
+        pre_segment = pts[:bounce_idx + 1]
+    else:
+        pre_segment = pts[:max(3, int(n * 0.6))]
+
     p_start = pre_segment[0]
     p_end = pre_segment[-1]
     chord_vec = p_end - p_start
@@ -150,57 +154,53 @@ def analyze_delivery(
                 max_dev_px = d
 
         swing_cm = round(abs(max_dev_px) * pixel_to_meter * 100.0, 1)
-        if swing_cm >= 1.5:
+        if swing_cm >= 2.0:
             if max_dev_px > 0:
                 swing_type = "INSWING" if hand == "RIGHT" else "OUTSWING"
             else:
                 swing_type = "OUTSWING" if hand == "RIGHT" else "INSWING"
 
-    # Synchronize turn and swing direction:
-    # An inswinging/inward delivery to RHB is Off-break/Off-spin (never Leg-spin).
-    # An outswinging/outward delivery to RHB is Leg-break/Leg-spin (never Off-spin).
-    if swing_type == "INSWING":
-        spin_type = "OFF_SPIN"
-        turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
-    elif swing_type == "OUTSWING":
-        spin_type = "LEG_SPIN"
-        turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
-    elif deviation_angle_deg >= 1.2:
+    # 3. Spin & Pitch Turn Classification
+    # Deviation off pitch (turn_signed) is the definitive signature of Spin:
+    # Negative turn_signed (moves left/inwards to RHB) = OFF BREAK / OFF SPIN
+    # Positive turn_signed (moves right/away from RHB) = LEG BREAK / LEG SPIN
+    if deviation_angle_deg >= 1.0:
         if turn_signed < 0:
-            turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
             spin_type = "OFF_SPIN"
+            turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
         else:
-            turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
             spin_type = "LEG_SPIN"
+            turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
     else:
-        turn_direction = "Straight Line"
         spin_type = "NONE"
+        if swing_type == "INSWING":
+            turn_direction = "Inswing (Shapes Inward to RHB)" if hand == "RIGHT" else "Outswing (Shapes Away from LHB)"
+        elif swing_type == "OUTSWING":
+            turn_direction = "Outswing (Shapes Away from RHB)" if hand == "RIGHT" else "Inswing (Shapes Inward to LHB)"
+        else:
+            turn_direction = "Straight Line"
 
-    # 3. Delivery Classification
-    # Ball is Inswing and speed <= 110 km/h -> classified as OFF_SPIN
-    # Ball is Inswing and speed > 110 km/h -> classified as INSWING
+    # 4. Delivery Type Classification
     measured_speed = speed_kmh if speed_kmh and speed_kmh > 0 else 80.0
 
-    if spin_type == "OFF_SPIN" or swing_type == "INSWING":
-        if measured_speed <= 110.0:
-            delivery_type = "OFF_SPIN"
-            spin_type = "OFF_SPIN"
-            turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
+    if measured_speed <= 105.0:
+        # Spin / Slow bowling
+        if deviation_angle_deg >= 1.0:
+            delivery_type = spin_type
+        elif swing_type != "NONE" and swing_cm >= 3.0:
+            delivery_type = "ARM_BALL"
         else:
-            delivery_type = "INSWING"
-            turn_direction = "Inswing (Shapes Inward to RHB)" if hand == "RIGHT" else "Outswing (Shapes Away from LHB)"
-    elif spin_type == "LEG_SPIN" or swing_type == "OUTSWING":
-        if measured_speed <= 110.0:
-            delivery_type = "LEG_SPIN"
-            spin_type = "LEG_SPIN"
-            turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
-        else:
-            delivery_type = "OUTSWING"
-            turn_direction = "Outswing (Shapes Away from RHB)" if hand == "RIGHT" else "Inswing (Shapes Inward to LHB)"
-    elif deviation_angle_deg >= 1.5:
-        delivery_type = spin_type
+            delivery_type = "STRAIGHT"
     else:
-        delivery_type = "STRAIGHT"
+        # Fast / Medium-Pace bowling
+        if deviation_angle_deg >= 1.5:
+            delivery_type = "OFF_CUTTER" if spin_type == "OFF_SPIN" else "LEG_CUTTER"
+        elif swing_type == "INSWING":
+            delivery_type = "INSWING"
+        elif swing_type == "OUTSWING":
+            delivery_type = "OUTSWING"
+        else:
+            delivery_type = "SEAM_STRAIGHT"
 
     confidence = min(0.98, max(0.60, round(0.5 + (len(pts) / 30.0) * 0.45, 2)))
 

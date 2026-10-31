@@ -81,7 +81,7 @@ video_processor = VideoProcessorProxy()
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "2.4-parallel-rf-15s",
+        "version": "2.5-spin-tracking-fix",
         "commit": "8d030e4",
         "custom_weights": getattr(video_processor, "is_custom_model", False),
         "roboflow_gpu": getattr(video_processor, "use_roboflow", False),
@@ -491,11 +491,14 @@ def upload_video():
                     progress_callback=on_processing_progress
                 )
 
-                # Save tracking record to database
-                add_run(
-                    speed=result["speed"],
-                    status=result["status"]
-                )
+                # Save tracking record to database (fail-safe)
+                try:
+                    add_run(
+                        speed=result["speed"],
+                        status=result["status"]
+                    )
+                except Exception as db_err:
+                    print(f"Database save notice: {db_err}")
 
                 final_data = {
                     "status": "success",
