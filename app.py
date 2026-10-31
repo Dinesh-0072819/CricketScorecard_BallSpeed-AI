@@ -81,10 +81,40 @@ video_processor = VideoProcessorProxy()
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "2.2-onnx",
+        "version": "2.3-rf-fixed",
         "custom_weights": getattr(video_processor, "is_custom_model", False),
-        "roboflow_gpu": getattr(video_processor, "use_roboflow", False)
+        "roboflow_gpu": getattr(video_processor, "use_roboflow", False),
+        "roboflow_status": getattr(video_processor, "roboflow_status_msg", "N/A")
     }), 200
+
+@app.route("/api/engine_status", methods=["GET"])
+def engine_status():
+    use_rf = os.getenv("USE_ROBOFLOW_CLOUD", "").lower().strip() == "true"
+    api_key = os.getenv("ROBOFLOW_API_KEY", "")
+    project = os.getenv("ROBOFLOW_PROJECT", "")
+    
+    test_result = "not tested"
+    if api_key and project:
+        try:
+            import requests
+            clean_proj = project.strip()
+            if "/" not in clean_proj:
+                clean_proj = f"{clean_proj}/1"
+            test_url = f"https://detect.roboflow.com/{clean_proj}?api_key={api_key.strip()}"
+            r = requests.get(test_url, timeout=4)
+            test_result = f"HTTP {r.status_code}: {r.text[:100]}"
+        except Exception as e:
+            test_result = str(e)
+            
+    return jsonify({
+        "roboflow_enabled": use_rf,
+        "has_api_key": bool(api_key),
+        "api_key_masked": (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 8 else ("SET" if api_key else "EMPTY"),
+        "project": project,
+        "processor_roboflow_active": getattr(video_processor, "use_roboflow", False),
+        "processor_status": getattr(video_processor, "roboflow_status_msg", "N/A"),
+        "roboflow_ping": test_result
+    })
 
 # Live Camera Tracking States
 live_tracker = None

@@ -5,6 +5,7 @@ import math
 import platform
 import shutil
 import gc
+import base64
 import torch
 import requests
 import numpy as np
@@ -69,6 +70,8 @@ class VideoProcessor:
         self.roboflow_project = os.getenv("ROBOFLOW_PROJECT", "")
         self.roboflow_workspace = os.getenv("ROBOFLOW_WORKSPACE", "")
         self.roboflow_warned = False
+        self.rf_session = requests.Session()
+        self.roboflow_status_msg = "Ready" if (self.use_roboflow and self.roboflow_api_key) else "Disabled (local engine active)"
         if self.use_roboflow and self.roboflow_api_key:
             print("Roboflow Cloud GPU Integration: ENABLED")
         else:
@@ -208,13 +211,17 @@ class VideoProcessor:
             # ---------------- ROBOFLOW CLOUD GPU INFERENCE ----------------
             if self.use_roboflow and self.roboflow_api_key and self.roboflow_project:
                 try:
-                    _, img_encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                    ep = f"https://detect.roboflow.com/{self.roboflow_project}/1?api_key={self.roboflow_api_key}&confidence=15"
-                    res = requests.post(
+                    _, img_encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    b64_image = base64.b64encode(img_encoded).decode('utf-8')
+                    clean_proj = self.roboflow_project.strip()
+                    if "/" not in clean_proj:
+                        clean_proj = f"{clean_proj}/1"
+                    ep = f"https://detect.roboflow.com/{clean_proj}?api_key={self.roboflow_api_key.strip()}&confidence=15"
+                    res = self.rf_session.post(
                         ep,
-                        data=img_encoded.tobytes(),
+                        data=b64_image,
                         headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                        timeout=1.5
+                        timeout=2.5
                     )
                     if res.status_code == 200:
                         pred_data = res.json()
@@ -227,12 +234,15 @@ class VideoProcessor:
                         used_cloud = True
                     else:
                         if not self.roboflow_warned:
-                            print(f"Roboflow Cloud notice (HTTP {res.status_code}): Switching to high-speed local YOLO engine.")
+                            err_preview = res.text[:120] if res.text else f"status {res.status_code}"
+                            print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
+                            self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
                             self.roboflow_warned = True
                         self.use_roboflow = False
                 except Exception as rf_err:
                     if not self.roboflow_warned:
-                        print(f"Roboflow Cloud connection note: {rf_err}. Switching to high-speed local YOLO engine.")
+                        print(f"Roboflow Cloud connection note: {rf_err}. Switching to high-speed local engine.")
+                        self.roboflow_status_msg = str(rf_err)
                         self.roboflow_warned = True
                     self.use_roboflow = False
 
