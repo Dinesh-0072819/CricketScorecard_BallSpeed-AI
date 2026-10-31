@@ -81,8 +81,9 @@ video_processor = VideoProcessorProxy()
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "2.1-fast",
-        "custom_weights": getattr(video_processor, "is_custom_model", False)
+        "version": "2.2-onnx",
+        "custom_weights": getattr(video_processor, "is_custom_model", False),
+        "roboflow_gpu": getattr(video_processor, "use_roboflow", False)
     }), 200
 
 # Live Camera Tracking States
@@ -502,7 +503,7 @@ def upload_video():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ----------------------------------
-# Serve Uploaded Videos
+# Serve Uploaded & Sample Videos
 # ----------------------------------
 
 @app.route("/uploads/<filename>")
@@ -511,6 +512,41 @@ def uploaded_file(filename):
         app.config["UPLOAD_FOLDER"],
         filename
     )
+
+@app.route("/static/samples/<path:filename>")
+def serve_sample(filename):
+    return send_from_directory("static/samples", filename)
+
+@app.route("/api/sample_videos", methods=["GET"])
+def get_sample_videos():
+    drive_link = "https://drive.google.com/drive/folders/1sEeM3oCp54qZ87t7_K_36-fSRxWE6vc5?usp=share_link"
+    samples = [
+        {
+            "id": "day_pace",
+            "name": "Daytime Pace Delivery",
+            "filename": "WhatsApp Video 2026-08-15 at 11.45.15.mp4",
+            "url": "/static/samples/WhatsApp%20Video%202026-08-15%20at%2011.45.15.mp4",
+            "speed": "94.6 km/h",
+            "type": "FAST PACE",
+            "description": "Daylight bowling footage. Ball tracked from hand to pitch at 94.6 km/h with 1.5 cm swing.",
+            "status": "NO-BALL"
+        },
+        {
+            "id": "night_spin",
+            "name": "Nighttime Spin Delivery",
+            "filename": "WhatsApp Video 2026-07-21 at 00.00.46.mp4",
+            "url": "/static/samples/WhatsApp%20Video%202026-07-21%20at%2000.00.46.mp4",
+            "speed": "81.1 km/h",
+            "type": "LEG_SPIN",
+            "description": "Floodlight spin delivery. High drift & spin deviation with 16.1 cm swing.",
+            "status": "NO-BALL"
+        }
+    ]
+    return jsonify({
+        "status": "success",
+        "drive_url": drive_link,
+        "samples": samples
+    })
 
 
 

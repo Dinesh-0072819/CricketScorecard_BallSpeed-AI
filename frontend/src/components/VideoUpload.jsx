@@ -1,5 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, Volume2, VolumeX, Zap, Loader2, Sparkles, Activity, Cpu, Play, Pause, RotateCcw, ChevronLeft, ChevronRight, Sliders, Eye } from 'lucide-react';
+import { 
+  UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, 
+  Volume2, VolumeX, Zap, Loader2, Sparkles, Activity, Cpu, Play, Pause, 
+  RotateCcw, ChevronLeft, ChevronRight, Sliders, Eye, FolderOpen, 
+  ExternalLink, Download, Check, Sun, Moon 
+} from 'lucide-react';
 
 export default function VideoUpload() {
   const [file, setFile] = useState(null);
@@ -12,6 +17,58 @@ export default function VideoUpload() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [isMuted, setIsMuted] = useState(false);
+  const [isLoadingSample, setIsLoadingSample] = useState(false);
+  const [loadedSampleId, setLoadedSampleId] = useState(null);
+
+  const DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1sEeM3oCp54qZ87t7_K_36-fSRxWE6vc5?usp=share_link";
+
+  const SAMPLE_VIDEOS = [
+    {
+      id: "day_pace",
+      title: "Daytime Pace Delivery",
+      speed: "94.6 km/h",
+      badge: "NO-BALL",
+      badgeColor: "#ff1744",
+      icon: "sun",
+      desc: "Fast delivery in bright daylight. Tracked cleanly from bowler release to batter.",
+      url: "/static/samples/sample_day_pace_94kmh.mp4",
+      filename: "WhatsApp Video 2026-08-15 at 11.45.15.mp4"
+    },
+    {
+      id: "night_spin",
+      title: "Nighttime Spin Delivery",
+      speed: "81.1 km/h",
+      badge: "LEG_SPIN",
+      badgeColor: "#00e676",
+      icon: "moon",
+      desc: "Floodlight bowling with sharp lateral drift (16.1 cm swing & leg-break deviation).",
+      url: "/static/samples/sample_night_spin_81kmh.mp4",
+      filename: "WhatsApp Video 2026-07-21 at 00.00.46.mp4"
+    }
+  ];
+
+  const handleLoadSample = async (sample) => {
+    try {
+      setIsLoadingSample(true);
+      setLoadedSampleId(sample.id);
+      setError('');
+      setResult(null);
+      setUploadPhase('idle');
+      setUploadProgress(0);
+      setProcessingProgress(0);
+
+      const res = await fetch(sample.url);
+      if (!res.ok) throw new Error("Could not download sample video file.");
+      const blob = await res.blob();
+      const sampleFile = new File([blob], sample.filename, { type: 'video/mp4' });
+      setFile(sampleFile);
+    } catch (err) {
+      console.error(err);
+      setError('Could not load sample video. Please try downloading it from Drive.');
+    } finally {
+      setIsLoadingSample(false);
+    }
+  };
 
   // Video Player & Coaching Analysis states
   const videoRef = useRef(null);
@@ -273,6 +330,157 @@ export default function VideoUpload() {
             {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
             {isMuted ? 'Sound Muted' : 'No-Ball Audio ON'}
           </button>
+        </div>
+
+        {/* Google Drive Sample Videos Card */}
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(14, 22, 42, 0.85) 0%, rgba(8, 14, 28, 0.95) 100%)',
+          border: '1px solid rgba(0, 242, 254, 0.25)',
+          borderRadius: '16px',
+          padding: '20px 24px',
+          marginBottom: '24px',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: '38px', height: '38px', borderRadius: '10px',
+                background: 'rgba(0, 242, 254, 0.1)', display: 'flex',
+                alignItems: 'center', justifyContent: 'center',
+                border: '1px solid rgba(0, 242, 254, 0.3)'
+              }}>
+                <FolderOpen size={20} color="#00f2fe" />
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h3 style={{ fontSize: '15px', fontWeight: '800', color: '#fff' }}>Sample Delivery Footage (Google Drive)</h3>
+                  <span style={{
+                    fontSize: '10px', fontWeight: '800', padding: '2px 8px', borderRadius: '10px',
+                    background: 'rgba(0, 242, 254, 0.15)', color: '#00f2fe', border: '1px solid rgba(0, 242, 254, 0.3)'
+                  }}>
+                    2 VERIFIED SAMPLES
+                  </span>
+                </div>
+                <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
+                  Click "Load Video" on either sample to test bowling speed analysis instantly, or open the Drive folder.
+                </p>
+              </div>
+            </div>
+
+            <a
+              href={DRIVE_FOLDER_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-action"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '6px',
+                padding: '8px 16px', fontSize: '12px', fontWeight: '700',
+                borderColor: 'rgba(0, 242, 254, 0.5)', color: '#00f2fe',
+                background: 'rgba(0, 242, 254, 0.12)', textDecoration: 'none'
+              }}
+            >
+              <ExternalLink size={14} />
+              Open Drive Folder
+            </a>
+          </div>
+
+          {/* Sample Video Cards Grid */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
+            {SAMPLE_VIDEOS.map((sample) => {
+              const isSelected = file && file.name === sample.filename;
+              return (
+                <div
+                  key={sample.id}
+                  style={{
+                    background: isSelected ? 'rgba(0, 242, 254, 0.08)' : 'rgba(255, 255, 255, 0.03)',
+                    border: isSelected ? '1px solid rgba(0, 242, 254, 0.6)' : '1px solid rgba(255, 255, 255, 0.08)',
+                    borderRadius: '12px',
+                    padding: '14px 16px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                    gap: '10px',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        {sample.icon === 'sun' ? <Sun size={15} color="#ffd166" /> : <Moon size={15} color="#00f2fe" />}
+                        <span style={{ fontSize: '13px', fontWeight: '800', color: '#f8fafc' }}>{sample.title}</span>
+                      </div>
+                      <span style={{
+                        fontSize: '11px', fontWeight: '800', padding: '2px 6px', borderRadius: '6px',
+                        background: `${sample.badgeColor}22`, color: sample.badgeColor, border: `1px solid ${sample.badgeColor}55`
+                      }}>
+                        {sample.speed} ({sample.badge})
+                      </span>
+                    </div>
+                    <p style={{ fontSize: '11px', color: '#94a3b8', lineHeight: '1.4' }}>
+                      {sample.desc}
+                    </p>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                    <button
+                      type="button"
+                      disabled={isLoadingSample || isProcessing}
+                      onClick={() => handleLoadSample(sample)}
+                      className="btn-action"
+                      style={{
+                        flex: 1,
+                        padding: '6px 12px',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px',
+                        borderColor: isSelected ? '#00e676' : 'rgba(0, 242, 254, 0.4)',
+                        color: isSelected ? '#00e676' : '#00f2fe',
+                        background: isSelected ? 'rgba(0, 230, 118, 0.15)' : 'rgba(0, 242, 254, 0.1)'
+                      }}
+                    >
+                      {isLoadingSample && loadedSampleId === sample.id ? (
+                        <>
+                          <Loader2 size={12} className="spin-animation" />
+                          Loading...
+                        </>
+                      ) : isSelected ? (
+                        <>
+                          <Check size={12} />
+                          Ready for AI
+                        </>
+                      ) : (
+                        <>
+                          <Zap size={12} />
+                          Load Video
+                        </>
+                      )}
+                    </button>
+
+                    <a
+                      href={sample.url}
+                      download={sample.filename}
+                      className="btn-action"
+                      title="Download MP4 video file"
+                      style={{
+                        padding: '6px 10px',
+                        fontSize: '11px',
+                        borderColor: 'rgba(255, 255, 255, 0.15)',
+                        color: '#94a3b8',
+                        textDecoration: 'none',
+                        display: 'flex',
+                        alignItems: 'center'
+                      }}
+                    >
+                      <Download size={13} />
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <form onSubmit={handleUpload}>
