@@ -81,7 +81,7 @@ video_processor = VideoProcessorProxy()
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "2.5-spin-tracking-fix",
+        "version": "2.6-rf-interpolated-15s",
         "commit": "8d030e4",
         "custom_weights": getattr(video_processor, "is_custom_model", False),
         "roboflow_gpu": getattr(video_processor, "use_roboflow", False),

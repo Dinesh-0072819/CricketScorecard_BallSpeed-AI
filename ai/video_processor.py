@@ -225,9 +225,17 @@ class VideoProcessor:
                 if not ret:
                     break
                 if f_idx % step == 0:
-                    _, enc = cv2.imencode('.jpg', f, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                    # Optimize image dimensions for rapid cloud network transfer (< 50KB per frame)
+                    h_f, w_f = f.shape[:2]
+                    scale_rf = 1.0
+                    if max(h_f, w_f) > 960:
+                        scale_rf = 960.0 / max(h_f, w_f)
+                        f_send = cv2.resize(f, (int(w_f * scale_rf), int(h_f * scale_rf)), interpolation=cv2.INTER_AREA)
+                    else:
+                        f_send = f
+                    _, enc = cv2.imencode('.jpg', f_send, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
                     b64_img = base64.b64encode(enc).decode('utf-8')
-                    frames_to_query.append((f_idx, b64_img))
+                    frames_to_query.append((f_idx, b64_img, scale_rf))
                 f_idx += 1
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -236,21 +244,21 @@ class VideoProcessor:
 
             def _query_rf(item):
                 nonlocal completed_queries
-                frame_i, b64 = item
+                frame_i, b64, s_rf = item
                 payload = {
                     "api_key": self.roboflow_api_key.strip(),
                     "inputs": {"image": {"type": "base64", "value": b64}}
                 }
                 dets, scs = [], []
                 try:
-                    res = self.rf_session.post(ep, json=payload, headers=headers, timeout=12.0, verify=False)
+                    res = self.rf_session.post(ep, json=payload, headers=headers, timeout=10.0, verify=False)
                     if res.status_code == 200:
                         pred_data = res.json()
                         outputs = pred_data.get("outputs", [])
                         if outputs:
                             preds = outputs[0].get("predictions", {}).get("predictions", [])
                             for pred in preds:
-                                dets.append((int(pred["x"]), int(pred["y"])))
+                                dets.append((int(pred["x"] / s_rf), int(pred["y"] / s_rf)))
                                 scs.append(float(pred.get("confidence", 0.5)))
                 except Exception as e:
                     pass
@@ -262,10 +270,28 @@ class VideoProcessor:
 
             try:
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     for f_i, dets, scs in executor.map(_query_rf, frames_to_query):
                         cloud_detections[f_i] = (dets, scs)
                 print(f"Roboflow Cloud GPU: parallel inference completed for {len(cloud_detections)} frames.")
+
+                # Smoothly interpolate intermediate/sampled frames at 0 CPU cost
+                for f_i in range(total_frames):
+                    if f_i not in cloud_detections:
+                        prev_d = cloud_detections.get(f_i - 1, ([], []))
+                        next_d = cloud_detections.get(f_i + 1, ([], []))
+                        if prev_d[0] and next_d[0]:
+                            p_pt = prev_d[0][0]
+                            n_pt = next_d[0][0]
+                            interp_pt = (int((p_pt[0] + n_pt[0]) / 2), int((p_pt[1] + n_pt[1]) / 2))
+                            interp_sc = (prev_d[1][0] + next_d[1][0]) / 2.0
+                            cloud_detections[f_i] = ([interp_pt], [interp_sc])
+                        elif prev_d[0]:
+                            cloud_detections[f_i] = (list(prev_d[0]), list(prev_d[1]))
+                        elif next_d[0]:
+                            cloud_detections[f_i] = (list(next_d[0]), list(next_d[1]))
+                        else:
+                            cloud_detections[f_i] = ([], [])
             except Exception as e:
                 print(f"Roboflow parallel execution note: {e}")
 
@@ -295,12 +321,11 @@ class VideoProcessor:
                 dets, scs = cloud_detections.get(raw_frame_number - 1, ([], []))
                 detections = list(dets)
                 scores = list(scs)
-                if len(detections) > 0:
-                    used_cloud = True
+                used_cloud = True
 
-            # ---------------- LOCAL BALL DETECTION (OPENCV DNN / PYTORCH) ----------------
-            # Fallback to local ONNX/YOLO whenever cloud didn't detect the ball or skipped frame
-            if not used_cloud or len(detections) == 0:
+            # ---------------- LOCAL BALL DETECTION FALLBACK ----------------
+            # Only run local CPU inference if Roboflow was not used
+            if not used_cloud:
                 if self.use_onnx:
                     lb, r, (dw, dh) = letterbox(frame, (640, 640))
                     blob = cv2.dnn.blobFromImage(lb, 1/255.0, (640, 640), swapRB=True, crop=False)
