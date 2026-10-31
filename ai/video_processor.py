@@ -329,7 +329,37 @@ class VideoProcessor:
             current_center = None
 
             if active_tracks:
-                primary_track = active_tracks[0]
+                # Select the best track: prioritize the ball in flight (moving towards batsman: dy > 0)
+                # rather than a static background false positive (e.g. at 394, 779)
+                best_track = active_tracks[0]
+                if len(active_tracks) > 1:
+                    best_score = -999.0
+                    for tr in active_tracks:
+                        if len(tr.smoothed_history) >= 2:
+                            p_prev = tr.smoothed_history[-2]
+                            p_curr = tr.smoothed_history[-1]
+                            dy = p_curr[1] - p_prev[1]
+                            dx = abs(p_curr[0] - p_prev[0])
+                            
+                            # Check if track is stationary in the background (< 6px movement over 10 frames)
+                            is_static = False
+                            if len(tr.smoothed_history) >= 10:
+                                p_old = tr.smoothed_history[-10]
+                                if abs(p_curr[0] - p_old[0]) < 6 and abs(p_curr[1] - p_old[1]) < 6:
+                                    is_static = True
+                                    
+                            if is_static:
+                                motion_score = -50.0
+                            else:
+                                motion_score = (dy * 3.0) + dx + (tr.score * 10.0)
+                                
+                            if motion_score > best_score:
+                                best_score = motion_score
+                                best_track = tr
+                        elif tr.score > best_track.score:
+                            best_track = tr
+
+                primary_track = best_track
                 raw_center = primary_track.history[-1]
                 smoothed_center = primary_track.smoothed_history[-1]
                 
