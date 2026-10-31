@@ -203,6 +203,72 @@ class VideoProcessor:
         track_max_speed = {}
         rf_failures = 0
 
+        # ---------------- ROBOFLOW PARALLEL CLOUD PRE-FETCH ----------------
+        cloud_detections = {}
+        if self.use_roboflow and self.roboflow_api_key:
+            if progress_callback:
+                progress_callback(5, 0, total_frames, "Sending delivery frames to Roboflow Cloud GPU...")
+
+            ws = self.roboflow_workspace or "cricspeed-ai"
+            wf = self.roboflow_project or "cricket-ball-detector-vcricket-ball-detector-logic"
+            ep = f"https://serverless.roboflow.com/infer/workflows/{ws}/cricket-ball-detector-vcricket-ball-detector-logic"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.roboflow_api_key.strip()}"
+            }
+
+            step = 2 if fps > 40.0 else 1
+            frames_to_query = []
+            f_idx = 0
+            while True:
+                ret, f = cap.read()
+                if not ret:
+                    break
+                if f_idx % step == 0:
+                    _, enc = cv2.imencode('.jpg', f, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                    b64_img = base64.b64encode(enc).decode('utf-8')
+                    frames_to_query.append((f_idx, b64_img))
+                f_idx += 1
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            total_queries = len(frames_to_query)
+            completed_queries = 0
+
+            def _query_rf(item):
+                nonlocal completed_queries
+                frame_i, b64 = item
+                payload = {
+                    "api_key": self.roboflow_api_key.strip(),
+                    "inputs": {"image": {"type": "base64", "value": b64}}
+                }
+                dets, scs = [], []
+                try:
+                    res = self.rf_session.post(ep, json=payload, headers=headers, timeout=12.0, verify=False)
+                    if res.status_code == 200:
+                        pred_data = res.json()
+                        outputs = pred_data.get("outputs", [])
+                        if outputs:
+                            preds = outputs[0].get("predictions", {}).get("predictions", [])
+                            for pred in preds:
+                                dets.append((int(pred["x"]), int(pred["y"])))
+                                scs.append(float(pred.get("confidence", 0.5)))
+                except Exception as e:
+                    pass
+                completed_queries += 1
+                if progress_callback and total_queries > 0:
+                    prog = min(75, 5 + int((completed_queries / total_queries) * 70))
+                    progress_callback(prog, completed_queries, total_queries, f"Cloud GPU Inferencing: {prog}%")
+                return frame_i, dets, scs
+
+            try:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                    for f_i, dets, scs in executor.map(_query_rf, frames_to_query):
+                        cloud_detections[f_i] = (dets, scs)
+                print(f"Roboflow Cloud GPU: parallel inference completed for {len(cloud_detections)} frames.")
+            except Exception as e:
+                print(f"Roboflow parallel execution note: {e}")
+
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -212,7 +278,10 @@ class VideoProcessor:
             frame_number += 1
 
             if progress_callback:
-                pct = min(92, max(1, int((frame_number / total_frames) * 92)))
+                if cloud_detections:
+                    pct = min(92, 75 + int((frame_number / total_frames) * 17))
+                else:
+                    pct = min(92, max(1, int((frame_number / total_frames) * 92)))
                 progress_callback(pct, frame_number, total_frames, f"AI Tracking Delivery: Frame {frame_number} of {total_frames} ({pct}%)")
 
             annotated = frame.copy()
@@ -222,87 +291,14 @@ class VideoProcessor:
             used_cloud = False
 
             # ---------------- ROBOFLOW CLOUD GPU INFERENCE ----------------
-            if self.use_roboflow and self.roboflow_api_key:
-                try:
-                    _, img_encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-                    b64_image = base64.b64encode(img_encoded).decode('utf-8')
-                    
-                    ws = self.roboflow_workspace or "cricspeed-ai"
-                    wf = self.roboflow_project or "cricket-ball-detector-vcricket-ball-detector-logic"
-                    if "cricket" in wf or "logic" in wf or "workflow" in wf:
-                        ep = f"https://serverless.roboflow.com/infer/workflows/{ws}/cricket-ball-detector-vcricket-ball-detector-logic"
-                        headers = {
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {self.roboflow_api_key.strip()}"
-                        }
-                        payload = {
-                            "api_key": self.roboflow_api_key.strip(),
-                            "inputs": {"image": {"type": "base64", "value": b64_image}}
-                        }
-                        res = self.rf_session.post(ep, json=payload, headers=headers, timeout=5.0)
-                        if res.status_code == 200:
-                            rf_failures = 0
-                            pred_data = res.json()
-                            outputs = pred_data.get("outputs", [])
-                            if outputs:
-                                preds = outputs[0].get("predictions", {}).get("predictions", [])
-                                for pred in preds:
-                                    cx = int(pred["x"])
-                                    cy = int(pred["y"])
-                                    conf = float(pred.get("confidence", 0.5))
-                                    detections.append((cx, cy))
-                                    scores.append(conf)
-                            used_cloud = True
-                        else:
-                            rf_failures += 1
-                            if not self.roboflow_warned:
-                                err_preview = res.text[:120] if res.text else f"status {res.status_code}"
-                                print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
-                                self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
-                                self.roboflow_warned = True
-                            if rf_failures >= 8:
-                                self.use_roboflow = False
-                    else:
-                        clean_proj = self.roboflow_project.strip()
-                        if "/" not in clean_proj:
-                            clean_proj = f"{clean_proj}/1"
-                        ep = f"https://detect.roboflow.com/{clean_proj}?api_key={self.roboflow_api_key.strip()}&confidence=15"
-                        res = self.rf_session.post(
-                            ep,
-                            data=b64_image,
-                            headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                            timeout=4.0
-                        )
-                        if res.status_code == 200:
-                            rf_failures = 0
-                            pred_data = res.json()
-                            for pred in pred_data.get("predictions", []):
-                                cx = int(pred["x"])
-                                cy = int(pred["y"])
-                                conf = float(pred.get("confidence", 0.5))
-                                detections.append((cx, cy))
-                                scores.append(conf)
-                            used_cloud = True
-                        else:
-                            rf_failures += 1
-                            if not self.roboflow_warned:
-                                err_preview = res.text[:120] if res.text else f"status {res.status_code}"
-                                print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
-                                self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
-                                self.roboflow_warned = True
-                            if rf_failures >= 8:
-                                self.use_roboflow = False
-                except Exception as rf_err:
-                    rf_failures += 1
-                    if not self.roboflow_warned:
-                        print(f"Roboflow Cloud connection note: {rf_err}. Switching to high-speed local engine.")
-                        self.roboflow_status_msg = str(rf_err)
-                        self.roboflow_warned = True
-                    if rf_failures >= 8:
-                        self.use_roboflow = False
+            if cloud_detections:
+                dets, scs = cloud_detections.get(raw_frame_number - 1, ([], []))
+                detections = list(dets)
+                scores = list(scs)
+                used_cloud = True
 
             # ---------------- LOCAL BALL DETECTION (OPENCV DNN / PYTORCH) ----------------
-            if not used_cloud or len(detections) == 0:
+            if not used_cloud:
                 if self.use_onnx:
                     lb, r, (dw, dh) = letterbox(frame, (640, 640))
                     blob = cv2.dnn.blobFromImage(lb, 1/255.0, (640, 640), swapRB=True, crop=False)
