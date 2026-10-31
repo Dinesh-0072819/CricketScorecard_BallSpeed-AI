@@ -209,36 +209,70 @@ class VideoProcessor:
             used_cloud = False
 
             # ---------------- ROBOFLOW CLOUD GPU INFERENCE ----------------
-            if self.use_roboflow and self.roboflow_api_key and self.roboflow_project:
+            if self.use_roboflow and self.roboflow_api_key:
                 try:
                     _, img_encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     b64_image = base64.b64encode(img_encoded).decode('utf-8')
-                    clean_proj = self.roboflow_project.strip()
-                    if "/" not in clean_proj:
-                        clean_proj = f"{clean_proj}/1"
-                    ep = f"https://detect.roboflow.com/{clean_proj}?api_key={self.roboflow_api_key.strip()}&confidence=15"
-                    res = self.rf_session.post(
-                        ep,
-                        data=b64_image,
-                        headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                        timeout=2.5
-                    )
-                    if res.status_code == 200:
-                        pred_data = res.json()
-                        for pred in pred_data.get("predictions", []):
-                            cx = int(pred["x"])
-                            cy = int(pred["y"])
-                            conf = float(pred.get("confidence", 0.5))
-                            detections.append((cx, cy))
-                            scores.append(conf)
-                        used_cloud = True
+                    
+                    ws = self.roboflow_workspace or "cricspeed-ai"
+                    wf = self.roboflow_project or "cricket-ball-detector-vcricket-ball-detector-logic"
+                    if "cricket" in wf or "logic" in wf or "workflow" in wf:
+                        ep = f"https://serverless.roboflow.com/infer/workflows/{ws}/cricket-ball-detector-vcricket-ball-detector-logic"
+                        headers = {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.roboflow_api_key.strip()}"
+                        }
+                        payload = {
+                            "api_key": self.roboflow_api_key.strip(),
+                            "inputs": {"image": {"type": "base64", "value": b64_image}}
+                        }
+                        res = self.rf_session.post(ep, json=payload, headers=headers, timeout=3.0)
+                        if res.status_code == 200:
+                            pred_data = res.json()
+                            outputs = pred_data.get("outputs", [])
+                            if outputs:
+                                preds = outputs[0].get("predictions", {}).get("predictions", [])
+                                for pred in preds:
+                                    cx = int(pred["x"])
+                                    cy = int(pred["y"])
+                                    conf = float(pred.get("confidence", 0.5))
+                                    detections.append((cx, cy))
+                                    scores.append(conf)
+                            used_cloud = True
+                        else:
+                            if not self.roboflow_warned:
+                                err_preview = res.text[:120] if res.text else f"status {res.status_code}"
+                                print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
+                                self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
+                                self.roboflow_warned = True
+                            self.use_roboflow = False
                     else:
-                        if not self.roboflow_warned:
-                            err_preview = res.text[:120] if res.text else f"status {res.status_code}"
-                            print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
-                            self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
-                            self.roboflow_warned = True
-                        self.use_roboflow = False
+                        clean_proj = self.roboflow_project.strip()
+                        if "/" not in clean_proj:
+                            clean_proj = f"{clean_proj}/1"
+                        ep = f"https://detect.roboflow.com/{clean_proj}?api_key={self.roboflow_api_key.strip()}&confidence=15"
+                        res = self.rf_session.post(
+                            ep,
+                            data=b64_image,
+                            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                            timeout=2.5
+                        )
+                        if res.status_code == 200:
+                            pred_data = res.json()
+                            for pred in pred_data.get("predictions", []):
+                                cx = int(pred["x"])
+                                cy = int(pred["y"])
+                                conf = float(pred.get("confidence", 0.5))
+                                detections.append((cx, cy))
+                                scores.append(conf)
+                            used_cloud = True
+                        else:
+                            if not self.roboflow_warned:
+                                err_preview = res.text[:120] if res.text else f"status {res.status_code}"
+                                print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
+                                self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
+                                self.roboflow_warned = True
+                            self.use_roboflow = False
                 except Exception as rf_err:
                     if not self.roboflow_warned:
                         print(f"Roboflow Cloud connection note: {rf_err}. Switching to high-speed local engine.")

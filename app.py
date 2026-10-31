@@ -92,23 +92,28 @@ def engine_status():
     use_rf = os.getenv("USE_ROBOFLOW_CLOUD", "").lower().strip() == "true"
     api_key = os.getenv("ROBOFLOW_API_KEY", "").strip()
     project = os.getenv("ROBOFLOW_PROJECT", "").strip()
-    workspace = os.getenv("ROBOFLOW_WORKSPACE", "").strip()
+    workspace = os.getenv("ROBOFLOW_WORKSPACE", "").strip() or "cricspeed-ai"
+    workflow = os.getenv("ROBOFLOW_WORKFLOW", "").strip() or "cricket-ball-detector-vcricket-ball-detector-logic"
     
     test_result = "not tested"
-    accessible_models = []
     if api_key:
         try:
             import requests
-            # Query Roboflow API to check accessible workspaces and projects
-            url = f"https://api.roboflow.com/{workspace or ''}?api_key={api_key}" if workspace else f"https://api.roboflow.com/?api_key={api_key}"
-            r = requests.get(url, timeout=4)
+            ep = f"https://serverless.roboflow.com/infer/workflows/{workspace}/{workflow}"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            b64_tiny = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            payload = {
+                "api_key": api_key,
+                "inputs": {"image": {"type": "base64", "value": b64_tiny}}
+            }
+            r = requests.post(ep, json=payload, headers=headers, timeout=5)
             if r.status_code == 200:
-                data = r.json()
-                test_result = f"Connected! Workspace: {data.get('workspace', {}).get('name', 'OK')}"
-                projects = data.get("workspace", {}).get("projects", [])
-                accessible_models = [p.get("id") for p in projects]
+                test_result = "HTTP 200 OK: Roboflow Cloud GPU Connected & Active!"
             else:
-                test_result = f"HTTP {r.status_code}: {r.text[:120]}"
+                test_result = f"HTTP {r.status_code}: {r.text[:100]}"
         except Exception as e:
             test_result = str(e)
             
@@ -116,12 +121,11 @@ def engine_status():
         "roboflow_enabled": use_rf,
         "has_api_key": bool(api_key),
         "api_key_masked": (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 8 else ("SET" if api_key else "EMPTY"),
-        "project": project,
         "workspace": workspace,
-        "accessible_models": accessible_models,
+        "workflow": workflow,
         "processor_roboflow_active": getattr(video_processor, "use_roboflow", False),
         "processor_status": getattr(video_processor, "roboflow_status_msg", "N/A"),
-        "roboflow_workspace_check": test_result
+        "roboflow_connection_test": test_result
     })
 
 # Live Camera Tracking States
