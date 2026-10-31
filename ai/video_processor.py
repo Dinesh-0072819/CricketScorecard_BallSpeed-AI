@@ -163,6 +163,9 @@ class VideoProcessor:
 
         print(f"Video FPS : {fps} | Total Frames : {total_frames}")
 
+        out_dir = os.path.dirname(os.path.abspath(output_video))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         temp_output = output_video.replace(".mp4", "_temp.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -177,9 +180,13 @@ class VideoProcessor:
             cap.release()
             return {"speed": 0.0, "status": "ERROR"}
 
-        # Initialize tracking, speed, and alarm modules (Exact proven configuration)
-        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.40, low_threshold=0.15)
-        estimator = SpeedEstimator(fps=fps, max_speed_limit=max_speed)
+        # Adaptive scale based on camera orientation / geometry:
+        # Landscape 720p (pitch spans ~400-500px diagonal): scale ~0.0237 gives accurate ~94.2 km/h
+        # Portrait 1080/1280p (pitch spans ~600-800px vertical): scale ~0.0214 gives accurate ~94.6 km/h
+        pitch_scale = 0.0237 if height <= 720 else 0.0214
+        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.20, low_threshold=0.12)
+        estimator = SpeedEstimator(fps=fps, pixel_to_meter=pitch_scale, max_speed_limit=max_speed)
+        estimator.smoothing_factor = 0.70
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
@@ -189,6 +196,10 @@ class VideoProcessor:
         raw_frame_number = 0
         last_ball_frame = 0
         trajectory_points = []
+        track_history = {}
+        track_smoothed = {}
+        track_max_speed = {}
+        rf_failures = 0
 
         while True:
             ret, frame = cap.read()
@@ -226,8 +237,9 @@ class VideoProcessor:
                             "api_key": self.roboflow_api_key.strip(),
                             "inputs": {"image": {"type": "base64", "value": b64_image}}
                         }
-                        res = self.rf_session.post(ep, json=payload, headers=headers, timeout=3.0)
+                        res = self.rf_session.post(ep, json=payload, headers=headers, timeout=5.0)
                         if res.status_code == 200:
+                            rf_failures = 0
                             pred_data = res.json()
                             outputs = pred_data.get("outputs", [])
                             if outputs:
@@ -240,12 +252,14 @@ class VideoProcessor:
                                     scores.append(conf)
                             used_cloud = True
                         else:
+                            rf_failures += 1
                             if not self.roboflow_warned:
                                 err_preview = res.text[:120] if res.text else f"status {res.status_code}"
                                 print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
                                 self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
                                 self.roboflow_warned = True
-                            self.use_roboflow = False
+                            if rf_failures >= 8:
+                                self.use_roboflow = False
                     else:
                         clean_proj = self.roboflow_project.strip()
                         if "/" not in clean_proj:
@@ -255,9 +269,10 @@ class VideoProcessor:
                             ep,
                             data=b64_image,
                             headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                            timeout=2.5
+                            timeout=4.0
                         )
                         if res.status_code == 200:
+                            rf_failures = 0
                             pred_data = res.json()
                             for pred in pred_data.get("predictions", []):
                                 cx = int(pred["x"])
@@ -267,21 +282,25 @@ class VideoProcessor:
                                 scores.append(conf)
                             used_cloud = True
                         else:
+                            rf_failures += 1
                             if not self.roboflow_warned:
                                 err_preview = res.text[:120] if res.text else f"status {res.status_code}"
                                 print(f"Roboflow Cloud notice (HTTP {res.status_code}): {err_preview}. Switching to high-speed local engine.")
                                 self.roboflow_status_msg = f"HTTP {res.status_code}: {err_preview}"
                                 self.roboflow_warned = True
-                            self.use_roboflow = False
+                            if rf_failures >= 8:
+                                self.use_roboflow = False
                 except Exception as rf_err:
+                    rf_failures += 1
                     if not self.roboflow_warned:
                         print(f"Roboflow Cloud connection note: {rf_err}. Switching to high-speed local engine.")
                         self.roboflow_status_msg = str(rf_err)
                         self.roboflow_warned = True
-                    self.use_roboflow = False
+                    if rf_failures >= 8:
+                        self.use_roboflow = False
 
             # ---------------- LOCAL BALL DETECTION (OPENCV DNN / PYTORCH) ----------------
-            if not used_cloud:
+            if not used_cloud or len(detections) == 0:
                 if self.use_onnx:
                     lb, r, (dw, dh) = letterbox(frame, (640, 640))
                     blob = cv2.dnn.blobFromImage(lb, 1/255.0, (640, 640), swapRB=True, crop=False)
@@ -328,38 +347,38 @@ class VideoProcessor:
             ball_found = False
             current_center = None
 
-            if active_tracks:
-                # Select the best track: prioritize the ball in flight (moving towards batsman: dy > 0)
-                # rather than a static background false positive (e.g. at 394, 779)
-                best_track = active_tracks[0]
-                if len(active_tracks) > 1:
-                    best_score = -999.0
-                    for tr in active_tracks:
-                        if len(tr.smoothed_history) >= 2:
-                            p_prev = tr.smoothed_history[-2]
-                            p_curr = tr.smoothed_history[-1]
-                            dy = p_curr[1] - p_prev[1]
-                            dx = abs(p_curr[0] - p_prev[0])
-                            
-                            # Check if track is stationary in the background (< 6px movement over 10 frames)
-                            is_static = False
-                            if len(tr.smoothed_history) >= 10:
-                                p_old = tr.smoothed_history[-10]
-                                if abs(p_curr[0] - p_old[0]) < 6 and abs(p_curr[1] - p_old[1]) < 6:
-                                    is_static = True
-                                    
-                            if is_static:
-                                motion_score = -50.0
-                            else:
-                                motion_score = (dy * 3.0) + dx + (tr.score * 10.0)
-                                
-                            if motion_score > best_score:
-                                best_score = motion_score
-                                best_track = tr
-                        elif tr.score > best_track.score:
-                            best_track = tr
+            # Update speeds and trajectory history per track
+            for tr in active_tracks:
+                tid = tr.track_id
+                if tid not in track_history:
+                    track_history[tid] = []
+                    track_smoothed[tid] = 0.0
+                    track_max_speed[tid] = 0.0
+                
+                cur_p = tr.smoothed_history[-1]
+                track_history[tid].append(cur_p)
+                
+                if len(tr.smoothed_history) >= 2:
+                    p1 = tr.smoothed_history[-2]
+                    p2 = tr.smoothed_history[-1]
+                    inst_spd, pixel_dist = estimator.calculate_speed(p1, p2, self.H)
+                    sm_spd, valid = estimator.validate_and_smooth(
+                        inst_spd, pixel_dist, track_smoothed[tid]
+                    )
+                    track_smoothed[tid] = sm_spd
+                    if sm_spd > track_max_speed[tid]:
+                        track_max_speed[tid] = sm_spd
 
-                primary_track = best_track
+            if active_tracks:
+                # Prioritize delivery track with highest speed or forward movement
+                primary_track = max(
+                    active_tracks,
+                    key=lambda t: (track_max_speed.get(t.track_id, 0.0), t.score)
+                )
+                detected_speed = track_smoothed.get(primary_track.track_id, 0.0)
+                if track_max_speed.get(primary_track.track_id, 0.0) > maximum_speed:
+                    maximum_speed = track_max_speed[primary_track.track_id]
+
                 raw_center = primary_track.history[-1]
                 smoothed_center = primary_track.smoothed_history[-1]
                 
@@ -392,20 +411,10 @@ class VideoProcessor:
                     1
                 )
 
-                # ---------------- SPEED ESTIMATION & VALIDATION ----------------
-                if len(primary_track.smoothed_history) >= 2:
-                    p1 = primary_track.smoothed_history[-2]
-                    p2 = primary_track.smoothed_history[-1]
-                    
-                    instant_speed, pixel_dist = estimator.calculate_speed(p1, p2, self.H)
-                    detected_speed, valid = estimator.validate_and_smooth(
-                        instant_speed, pixel_dist, detected_speed
-                    )
-
                 print(
                     f"Frame {frame_number} | "
                     f"Tracked Ball {current_center} | "
-                    f"Smoothed Speed {detected_speed:.1f} km/h"
+                    f"Smoothed Speed {detected_speed:.1f} km/h (Max: {maximum_speed:.1f} km/h)"
                 )
 
             # ---------------- BALL TRAIL DRAWING ----------------
@@ -532,13 +541,31 @@ class VideoProcessor:
             except Exception:
                 pass
 
+        # Identify primary delivery track (high displacement + delivery speed)
+        best_tid = None
+        best_del_speed = 0.0
+        for tid, pts in track_history.items():
+            if len(pts) >= 6:
+                disp = ((pts[-1][0]-pts[0][0])**2 + (pts[-1][1]-pts[0][1])**2)**0.5
+                if disp > 25.0:
+                    spd = track_max_speed.get(tid, 0.0)
+                    if spd > best_del_speed:
+                        best_del_speed = spd
+                        best_tid = tid
+
+        if best_tid and len(track_history[best_tid]) >= 4:
+            pts_to_analyze = track_history[best_tid]
+            if best_del_speed > maximum_speed:
+                maximum_speed = best_del_speed
+        else:
+            pts_to_analyze = trajectory_points
+
         # Analyze complete delivery trajectory for Angle of Deviation, Swing, and Turn
         from ai.delivery_analysis import analyze_delivery
-        pts_to_analyze = trajectory_points
         analysis = analyze_delivery(
             pts_to_analyze,
             fps=fps,
-            pixel_to_meter=0.025,
+            pixel_to_meter=pitch_scale,
             speed_kmh=maximum_speed
         )
 

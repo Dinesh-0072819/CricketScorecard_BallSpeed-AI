@@ -34,15 +34,15 @@ class SpeedEstimator:
         Calculates instantaneous speed in km/h between two points.
         p1, p2: (x, y) tuples representing consecutive positions.
         H: Optional perspective Homography matrix.
-        Strict rule: calculate only ball towards camera (dy > 0), not away (dy <= 0).
+        Strict rule: calculate only forward delivery movement towards batsman, not backward.
         """
         dy = p2[1] - p1[1]
+        dx = p2[0] - p1[0]
 
-        # If the ball is moving away from the camera (dy <= 0), do not calculate speed
-        if dy <= 0:
+        # Ignore sharp backward movement towards bowler (rebound off bat or bowler walkback)
+        if dy < -15.0 and abs(dx) < 15.0:
             return 0.0, 0.0
 
-        dx = p2[0] - p1[0]
         pixel_distance = math.sqrt(dx * dx + dy * dy)
 
         if H is not None:
@@ -66,9 +66,12 @@ class SpeedEstimator:
         Validate and smooth speed to prevent spikes.
         """
         if pixel_distance < self.max_pixel_jump and instant_speed < 180.0:
-            smoothed_speed = (
-                current_smoothed_speed * self.smoothing_factor +
-                instant_speed * (1.0 - self.smoothing_factor)
-            )
+            if current_smoothed_speed < 15.0 and instant_speed > 35.0:
+                smoothed_speed = instant_speed * 0.72
+            else:
+                smoothed_speed = (
+                    current_smoothed_speed * self.smoothing_factor +
+                    instant_speed * (1.0 - self.smoothing_factor)
+                )
             return smoothed_speed, True
         return current_smoothed_speed, False

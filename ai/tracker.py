@@ -121,7 +121,7 @@ class ByteTracker:
     """
     ByteTrack logic tailored for tracking a cricket ball.
     """
-    def __init__(self, dt=1.0/30.0, high_threshold=0.5, low_threshold=0.15, max_lost_frames=15):
+    def __init__(self, dt=1.0/30.0, high_threshold=0.20, low_threshold=0.12, max_lost_frames=15):
         self.dt = dt
         self.high_threshold = high_threshold
         self.low_threshold = low_threshold
@@ -226,5 +226,16 @@ class ByteTracker:
         # Filter out completely dead tracks
         self.tracks = [t for t in self.tracks if t.time_since_update <= self.max_lost_frames]
         
-        # Return all active tracks
-        return [t for t in self.tracks if t.state == 1]
+        # Suppress stationary noise tracks (e.g. grass patch or shoe mark: < 8px displacement over 10 frames)
+        valid_tracks = []
+        for t in self.tracks:
+            if t.state == 1:
+                if len(t.smoothed_history) >= 10:
+                    p_old = t.smoothed_history[-10]
+                    p_cur = t.smoothed_history[-1]
+                    disp = ((p_cur[0] - p_old[0])**2 + (p_cur[1] - p_old[1])**2)**0.5
+                    if disp < 8.0:
+                        continue # Skip static background false positive
+                valid_tracks.append(t)
+        
+        return valid_tracks
