@@ -1,3 +1,21 @@
+import os
+# Prevent OpenMP and threading deadlocks under Gunicorn
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+try:
+    import torch
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 from flask import (
     Flask,
     render_template,
@@ -9,11 +27,9 @@ from flask import (
 
 import cv2
 import numpy as np
-import os
 import base64
 
 from ai.camera import Camera
-from ai.video_processor import VideoProcessor
 from ai.tracker import ByteTracker
 from ai.speed import SpeedEstimator
 from ai.alarm import AlarmSystem
@@ -44,7 +60,22 @@ app.config["MAX_SPEED"] = 70.0
 # ----------------------------------
 
 camera = Camera()
-video_processor = VideoProcessor()
+
+class VideoProcessorProxy:
+    """Lazy-loads VideoProcessor inside the worker to prevent C++ OpenMP fork deadlocks."""
+    def __init__(self):
+        self._vp = None
+
+    def _ensure(self):
+        if self._vp is None:
+            from ai.video_processor import VideoProcessor
+            self._vp = VideoProcessor()
+        return self._vp
+
+    def __getattr__(self, name):
+        return getattr(self._ensure(), name)
+
+video_processor = VideoProcessorProxy()
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -306,8 +337,17 @@ def camera_stats():
 # ----------------------------------
 
 PROGRESS_FILE = "/tmp/cricspeed_progress.json"
+GLOBAL_PROGRESS = {
+    "status": "idle",
+    "percent": 0,
+    "frame": 0,
+    "total_frames": 0,
+    "message": ""
+}
 
 def write_progress(state):
+    global GLOBAL_PROGRESS
+    GLOBAL_PROGRESS = dict(state)
     try:
         with open(PROGRESS_FILE, "w") as f:
             import json as _json
@@ -316,20 +356,19 @@ def write_progress(state):
         pass
 
 def read_progress():
+    global GLOBAL_PROGRESS
+    if GLOBAL_PROGRESS.get("status") != "idle":
+        return GLOBAL_PROGRESS
     try:
         if os.path.exists(PROGRESS_FILE):
             with open(PROGRESS_FILE, "r") as f:
                 import json as _json
-                return _json.load(f)
+                data = _json.load(f)
+                GLOBAL_PROGRESS = data
+                return data
     except Exception:
         pass
-    return {
-        "status": "idle",
-        "percent": 0,
-        "frame": 0,
-        "total_frames": 0,
-        "message": ""
-    }
+    return GLOBAL_PROGRESS
 
 @app.route("/upload_progress", methods=["GET"])
 def get_upload_progress():
