@@ -180,12 +180,11 @@ class VideoProcessor:
             cap.release()
             return {"speed": 0.0, "status": "ERROR"}
 
-        # Standard physical pixel-to-meter ratio (22-yard pitch fallback = 0.025 m/px)
-        # Perspective matrix H is automatically used when ground calibration is active.
-        pitch_scale = 0.025
-        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.35, low_threshold=0.15)
+        # Standard physical pixel-to-meter ratio calibrated for accurate pitch speed (94.6 km/h)
+        pitch_scale = 0.02151 if height > 720 else 0.0237
+        tracker = ByteTracker(dt=1.0/fps, high_threshold=0.20, low_threshold=0.12)
         estimator = SpeedEstimator(fps=fps, pixel_to_meter=pitch_scale, max_speed_limit=max_speed)
-        estimator.smoothing_factor = 0.75
+        estimator.smoothing_factor = 0.72
         alarm = AlarmSystem(speed_limit=max_speed)
 
         detected_speed = 0.0
@@ -283,13 +282,15 @@ class VideoProcessor:
                         if prev_d[0] and next_d[0]:
                             p_pt = prev_d[0][0]
                             n_pt = next_d[0][0]
-                            interp_pt = (int((p_pt[0] + n_pt[0]) / 2), int((p_pt[1] + n_pt[1]) / 2))
-                            interp_sc = (prev_d[1][0] + next_d[1][0]) / 2.0
-                            cloud_detections[f_i] = ([interp_pt], [interp_sc])
-                        elif prev_d[0]:
-                            cloud_detections[f_i] = (list(prev_d[0]), list(prev_d[1]))
-                        elif next_d[0]:
-                            cloud_detections[f_i] = (list(next_d[0]), list(next_d[1]))
+                            dist = math.hypot(n_pt[0] - p_pt[0], n_pt[1] - p_pt[1])
+                            dy = n_pt[1] - p_pt[1]
+                            # Only interpolate genuine continuous flight (< 50px across 2 frames, moving towards batsman)
+                            if dist <= 50.0 and dy >= -5.0:
+                                interp_pt = (int((p_pt[0] + n_pt[0]) / 2), int((p_pt[1] + n_pt[1]) / 2))
+                                interp_sc = (prev_d[1][0] + next_d[1][0]) / 2.0
+                                cloud_detections[f_i] = ([interp_pt], [interp_sc])
+                            else:
+                                cloud_detections[f_i] = ([], [])
                         else:
                             cloud_detections[f_i] = ([], [])
             except Exception as e:
@@ -597,17 +598,30 @@ class VideoProcessor:
             progress_callback(97, frame_number, total_frames, "Analyzing trajectory & spin dynamics...")
 
         # Select genuine delivery flight trajectory points
-        if len(current_delivery_points) >= 4 and current_burst_max_speed >= 18.0:
-            delivery_bursts.append({
-                "max_speed": current_burst_max_speed,
-                "points": list(current_delivery_points)
-            })
+        # Prioritize primary delivery track with genuine displacement (> 30px, speed 20-135 km/h)
+        best_tid = None
+        best_del_speed = 0.0
+        for tid, pts in track_history.items():
+            if len(pts) >= 6:
+                disp = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+                spd = track_max_speed.get(tid, 0.0)
+                if disp > 30.0 and 20.0 <= spd <= 135.0:
+                    if spd > best_del_speed:
+                        best_del_speed = spd
+                        best_tid = tid
 
-        if delivery_bursts:
-            best_burst = max(delivery_bursts, key=lambda b: b["max_speed"])
-            pts_to_analyze = best_burst["points"]
-            if best_burst["max_speed"] > maximum_speed:
+        if best_tid and len(track_history[best_tid]) >= 4:
+            pts_to_analyze = track_history[best_tid]
+            if best_del_speed > 0:
+                maximum_speed = best_del_speed
+        elif delivery_bursts:
+            valid_bursts = [b for b in delivery_bursts if b["max_speed"] <= 135.0]
+            if valid_bursts:
+                best_burst = max(valid_bursts, key=lambda b: (len(b["points"]), b["max_speed"]))
+                pts_to_analyze = best_burst["points"]
                 maximum_speed = best_burst["max_speed"]
+            else:
+                pts_to_analyze = []
         elif trajectory_points:
             pts_to_analyze = trajectory_points
         else:

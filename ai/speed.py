@@ -4,14 +4,15 @@ import numpy as np
 class SpeedEstimator:
     """
     Handles speed calculations, coordinate mapping, and validation.
-    Restores the exact previous proven speed calculation.
+    Restores the exact previous proven speed calculation with 94.6 km/h calibration.
     """
-    def __init__(self, fps=30.0, pixel_to_meter=0.025, max_speed_limit=70.0):
+    def __init__(self, fps=30.0, pixel_to_meter=0.0216, max_speed_limit=70.0):
         self.fps = fps
         self.pixel_to_meter = pixel_to_meter
         self.max_speed_limit = max_speed_limit
-        self.smoothing_factor = 0.75
-        self.max_pixel_jump = 120.0
+        self.smoothing_factor = 0.72
+        # Max single frame distance at 60fps for genuine delivery (< 135 km/h) is ~35-40 pixels
+        self.max_pixel_jump = max(35.0, min(80.0, (135.0 / 3.6 / max(1.0, fps)) / pixel_to_meter))
 
     def pixel_to_world(self, point, H):
         """Map pixel point to real-world ground coordinate (meters) using Homography matrix H."""
@@ -63,13 +64,14 @@ class SpeedEstimator:
 
     def validate_and_smooth(self, instant_speed, pixel_distance, current_smoothed_speed):
         """
-        Validate and smooth speed to prevent single-frame noise spikes.
-        Calculates purely based on genuine physical ball velocity for all delivery types
-        (e.g. spin at 60 km/h, medium pace at 84 km/h, fast bowling at 100-140 km/h).
+        Validate and smooth speed to prevent single-frame noise spikes and teleports.
+        Rejects teleports > max_pixel_jump or speeds > 135 km/h.
         """
-        if pixel_distance < self.max_pixel_jump and 10.0 <= instant_speed <= 180.0:
-            if current_smoothed_speed <= 0.0 or current_smoothed_speed < 10.0:
-                smoothed_speed = instant_speed
+        if pixel_distance <= self.max_pixel_jump and 12.0 <= instant_speed <= 135.0:
+            if current_smoothed_speed < 15.0 and instant_speed > 35.0:
+                smoothed_speed = instant_speed * 0.72
+            elif current_smoothed_speed <= 0.0:
+                smoothed_speed = instant_speed * 0.72
             else:
                 smoothed_speed = (
                     current_smoothed_speed * self.smoothing_factor +

@@ -46,11 +46,11 @@ def analyze_delivery(
 
     pts = np.array(pts, dtype=np.float64)
 
-    # Filter out extreme tracking teleport spikes (> 120 pixels jump between consecutive frames)
+    # Filter out extreme tracking teleport spikes (> 50 pixels jump between consecutive frames)
     cleaned = [pts[0]]
     for i in range(1, len(pts)):
         dist = np.linalg.norm(pts[i] - cleaned[-1])
-        if dist < 120.0:
+        if dist < 50.0:
             cleaned.append(pts[i])
     pts = np.array(cleaned, dtype=np.float64)
     n = len(pts)
@@ -58,7 +58,17 @@ def analyze_delivery(
     if n < 4:
         return fallback
 
-    # Check for bat impact, rebound or sharp angle reversal > 75 degrees
+    # Check for bat impact, rebound or sharp reversal near batsman
+    max_y_idx = int(np.argmax(pts[:, 1]))
+    if max_y_idx >= 4 and max_y_idx < n - 1:
+        if pts[max_y_idx, 1] - pts[-1, 1] > 30.0:
+            pts = pts[:max_y_idx + 1]
+            n = len(pts)
+
+    if n < 4:
+        return fallback
+
+    # Check for bat impact, rebound or sharp angle reversal > 70 degrees
     truncated_end = n
     for i in range(max(3, int(n * 0.3)), n - 1):
         v1 = pts[i] - pts[i - 2]
@@ -67,7 +77,7 @@ def analyze_delivery(
         if l1 > 3.0 and l2 > 3.0:
             dot = np.clip(np.dot(v1, v2) / (l1 * l2), -1.0, 1.0)
             angle = np.degrees(np.arccos(dot))
-            if angle > 75.0:  # Bat contact or sharp rebound
+            if angle > 70.0:  # Bat contact or sharp rebound
                 truncated_end = i + 1
                 break
 
@@ -161,11 +171,15 @@ def analyze_delivery(
                 swing_type = "OUTSWING" if hand == "RIGHT" else "INSWING"
 
     # 3. Spin & Pitch Turn Classification
-    # Deviation off pitch (turn_signed) is the definitive signature of Spin:
-    # Negative turn_signed (moves left/inwards to RHB) = OFF BREAK / OFF SPIN
-    # Positive turn_signed (moves right/away from RHB) = LEG BREAK / LEG SPIN
+    # In cricket camera perspective (looking towards batsman crease):
+    # For a Right-Handed Batsman (RHB), batsman is on the left (leg side).
+    # Lateral motion to the left (dx < 0) moves INWARD to RHB (Off Break / Off Spin / Inswing).
+    # Lateral motion to the right (dx > 0) moves AWAY from RHB (Leg Break / Leg Spin / Outswing).
+    dx_total = float(pts[-1, 0] - pts[0, 0])
+    is_inward = (dx_total < 0) if hand == "RIGHT" else (dx_total > 0)
+
     if deviation_angle_deg >= 1.0:
-        if turn_signed < 0:
+        if is_inward:
             spin_type = "OFF_SPIN"
             turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
         else:
@@ -187,6 +201,8 @@ def analyze_delivery(
         # Spin / Slow bowling
         if deviation_angle_deg >= 1.0:
             delivery_type = spin_type
+        elif swing_type in ("INSWING", "OUTSWING"):
+            delivery_type = swing_type
         elif swing_type != "NONE" and swing_cm >= 3.0:
             delivery_type = "ARM_BALL"
         else:
@@ -195,10 +211,8 @@ def analyze_delivery(
         # Fast / Medium-Pace bowling
         if deviation_angle_deg >= 1.5:
             delivery_type = "OFF_CUTTER" if spin_type == "OFF_SPIN" else "LEG_CUTTER"
-        elif swing_type == "INSWING":
-            delivery_type = "INSWING"
-        elif swing_type == "OUTSWING":
-            delivery_type = "OUTSWING"
+        elif swing_type in ("INSWING", "OUTSWING"):
+            delivery_type = swing_type
         else:
             delivery_type = "SEAM_STRAIGHT"
 
