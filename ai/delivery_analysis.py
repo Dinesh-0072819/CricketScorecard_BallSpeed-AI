@@ -1,231 +1,363 @@
-import math
-import numpy as np
-from typing import List, Dict, Any, Optional
+"""
+Delivery analysis: speed, bounce, swing and spin from a tracked ball path.
 
+Coordinate convention used for classification ("pitch frame"):
+    lateral  L  metres, POSITIVE = to the right as seen from the BOWLER's end
+                (= the LEG side of a right-handed batsman)
+    along    D  metres from the release point towards the batsman
+
+    Right-handed batsman (RHB):
+        ball moves towards +L (into the batsman, off -> leg)
+            in the air        -> INSWING
+            off the pitch     -> OFF_SPIN   (off-break)
+        ball moves towards -L (away from the batsman, leg -> off)
+            in the air        -> OUTSWING
+            off the pitch     -> LEG_SPIN   (leg-break)
+    Left-handed batsman: mirrored.
+
+Two entry points:
+    analyze_video_track(...)  image track from the video pipeline (frame, x, y, size)
+    analyze_delivery(...)     generic; accepts an image track or a pitch-frame track
+                              ([{"x": L, "y": D, "py": pixel_y}, ...]) for tests/tools.
+
+SPEED
+-----
+Speed = release-to-batsman distance / time of flight. The time of flight comes
+from the frame numbers of the first (release) and last (bat / stumps) tracked
+positions, so it does not depend on a guessed pixel-to-metre scale. The
+distance is the pitch length minus the two creases (bowler releases at the
+popping crease, batsman plays at his popping crease): 20.12 - 2 x 1.22 = 17.68 m
+for a standard pitch. Set PITCH_LENGTH_M (env) or the upload form field
+`pitch_length_m` for turf / box-cricket pitches.
+This is the AVERAGE speed over the flight; a speed gun shows release speed,
+which is typically ~8-12% higher (tennis balls slow down more).
+"""
+import math
+import os
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
+# Thresholds (also imported by tests via config.py)
+TURN_MIN_DEG = float(os.getenv("TURN_MIN_DEG", "2.0"))      # off-the-pitch turn to call it spin
+TURN_MIN_LATERAL_M = 0.04                                  # and at least 4 cm sideways after bounce
+SWING_MIN_M = float(os.getenv("SWING_MIN_M", "0.08"))      # in-air lateral curve to call it swing
+CREASE_OFFSET_M = 1.22
+DEFAULT_PITCH_LENGTH_M = float(os.getenv("PITCH_LENGTH_M", "20.12"))
+BALL_DIAMETER_M = float(os.getenv("BALL_DIAMETER_M", "0.067"))   # tennis ball (leather = 0.072)
+BALL_BOX_SCALE = float(os.getenv("BALL_BOX_SCALE", "1.0"))       # YOLO box / real ball size correction
+PACE_MIN_KMH = float(os.getenv("PACE_MIN_KMH", "100"))
+BOUNCE_SPEED_RETENTION = float(os.getenv("BOUNCE_SPEED_RETENTION", "0.9"))
+
+
+# --------------------------------------------------------------------------- helpers
+def _fallback(reason: str = "insufficient_data") -> Dict[str, Any]:
+    return {
+        "status": reason,
+        "deviation_angle_deg": 0.0,
+        "turn_angle_deg": 0.0,
+        "turn_direction": "Straight",
+        "swing_cm": 0.0,
+        "turn_cm": 0.0,
+        "delivery_type": "STRAIGHT",
+        "spin_type": "NONE",
+        "swing_type": "NONE",
+        "bowler_style": "UNKNOWN",
+        "bounce_index": None,
+        "confidence": 0.0,
+    }
+
+
+def _robust_polyfit(x: np.ndarray, y: np.ndarray, deg: int, iters: int = 3) -> np.ndarray:
+    """Least squares with simple iterative outlier down-weighting."""
+    w = np.ones_like(y, dtype=float)
+    coef = np.polyfit(x, y, deg, w=w)
+    for _ in range(iters):
+        r = y - np.polyval(coef, x)
+        s = 1.4826 * np.median(np.abs(r)) + 1e-9
+        w = 1.0 / np.maximum(1.0, np.abs(r) / (2.5 * s))
+        coef = np.polyfit(x, y, deg, w=w)
+    return coef
+
+
+def find_bounce(t: np.ndarray, py: np.ndarray) -> Optional[int]:
+    """
+    Bounce = the point where the vertical image velocity drops most sharply
+    (ball stops going down the image and starts going up). Works for a camera
+    behind either end. Returns an index into the arrays or None (full toss /
+    yorker / too short).
+    """
+    n = len(t)
+    if n < 6:
+        return None
+    vy = np.gradient(py, t)
+    speed = np.median(np.abs(vy)) + 1e-6
+    # noise level of the vertical velocity (from its own second differences)
+    noise = 1.4826 * np.median(np.abs(np.diff(vy))) + 1e-6
+    best, best_i = 0.0, None
+    for i in range(2, n - 2):
+        before = vy[max(0, i - 3):i].mean()
+        after = vy[i + 1:i + 4].mean()
+        # gravity and perspective only ever make the ball speed UP down the screen
+        # before it pitches; a sharp DROP in downward speed is the bounce
+        drop = before - after
+        if drop > best:
+            best, best_i = drop, i
+    if best_i is None or best < max(0.5 * speed, 1.5 * noise):
+        return None
+    # snap to the lowest on-screen point near the kink
+    lo, hi = max(0, best_i - 2), min(n, best_i + 3)
+    best_i = lo + int(np.argmax(py[lo:hi]))
+    if best_i < 2 or best_i > n - 2:
+        return None
+    return best_i
+
+
+def _classify(
+    L: np.ndarray, D: np.ndarray, bounce: Optional[int], hand: str, speed_kmh: Optional[float]
+) -> Dict[str, Any]:
+    """Core classifier in the pitch frame (see module docstring)."""
+    n = len(L)
+    hand = "LEFT" if str(hand).upper().startswith("L") else "RIGHT"
+    mirror = -1.0 if hand == "LEFT" else 1.0   # +L towards leg side of this batsman
+
+    pre_end = bounce if bounce is not None else n - 1
+    pre_L, pre_D = L[:pre_end + 1], D[:pre_end + 1]
+
+    # ---- swing: lateral curvature of the in-air path before the bounce ----
+    swing_m, swing_dir = 0.0, 0.0
+    if len(pre_L) >= 4 and np.ptp(pre_D) > 0.5:
+        dn = (pre_D - pre_D[0]) / np.ptp(pre_D)                       # 0..1 along the flight
+        c2 = _robust_polyfit(dn, pre_L, 2)[0] if len(pre_L) >= 5 else np.polyfit(dn, pre_L, 2)[0]
+        swing_m = abs(c2) / 4.0                                       # max bulge from the chord
+        swing_dir = math.copysign(1.0, c2) if swing_m > 0 else 0.0    # direction of late movement
+
+    # ---- turn: change of direction at the bounce ----
+    turn_deg, turn_m = 0.0, 0.0
+    turn_reliable = False
+    if bounce is not None and bounce >= 2 and n - bounce >= 3:
+        preD, preL = D[:bounce + 1], L[:bounce + 1]
+        if len(preD) >= 6 and np.ptp(preD) > 1.0:
+            q = _robust_polyfit(preD, preL, 2)                                  # allows for swing
+            a = float(2 * q[0] * preD[-1] + q[1])                               # dL/dD at the bounce
+        else:
+            a = float(np.polyfit(preD, preL, 1)[0])
+        post_D, post_L = D[bounce:], L[bounce:]
+        if np.ptp(post_D) > 0.2:
+            b = np.polyfit(post_D, post_L, 1)[0]                               # dL/dD after
+            turn_deg = math.degrees(math.atan(b) - math.atan(a))
+            # sideways distance from where a straight ball would be at the end of the track
+            turn_m = (b - a) * float(post_D[-1] - post_D[0])
+            # need enough of the path after the bounce to measure a change of direction
+            turn_reliable = len(post_D) >= 6 and np.ptp(post_D) >= 1.5
+
+    toward_leg_turn = (turn_deg * mirror) > 0
+    toward_leg_swing = (swing_dir * mirror) > 0
+
+    spin_type = "NONE"
+    if turn_reliable and abs(turn_deg) >= TURN_MIN_DEG and abs(turn_m) >= TURN_MIN_LATERAL_M:
+        spin_type = "OFF_SPIN" if toward_leg_turn else "LEG_SPIN"
+    swing_type = "NONE"
+    if swing_m >= SWING_MIN_M:
+        swing_type = "INSWING" if toward_leg_swing else "OUTSWING"
+
+    # both present: the movement that exceeds its threshold more strongly wins
+    spin_strength = abs(turn_deg) / TURN_MIN_DEG if spin_type != "NONE" else 0.0
+    swing_strength = swing_m / SWING_MIN_M if swing_type != "NONE" else 0.0
+    if spin_strength == 0.0 and swing_strength == 0.0:
+        delivery_type = "STRAIGHT"
+    elif spin_strength >= swing_strength:
+        delivery_type = spin_type
+    else:
+        delivery_type = swing_type
+
+    who = "RHB" if hand == "RIGHT" else "LHB"
+    if delivery_type == "OFF_SPIN":
+        turn_direction = f"Off Break (turns into the {who})"
+    elif delivery_type == "LEG_SPIN":
+        turn_direction = f"Leg Break (turns away from the {who})"
+    elif delivery_type == "INSWING":
+        turn_direction = f"Inswing (curves into the {who})"
+    elif delivery_type == "OUTSWING":
+        turn_direction = f"Outswing (curves away from the {who})"
+    else:
+        turn_direction = "Straight Line"
+
+    style = "UNKNOWN"
+    if speed_kmh:
+        style = "PACER" if speed_kmh >= PACE_MIN_KMH else "SPINNER"
+
+    return {
+        "status": "ok",
+        "deviation_angle_deg": round(float(abs(turn_deg)), 1),
+        "turn_angle_deg": round(float(abs(turn_deg)), 1),
+        "turn_angle_signed_deg": round(float(turn_deg * mirror), 2),   # + = towards this batsman's leg side
+        "turn_cm": round(float(abs(turn_m)) * 100.0, 1),
+        "turn_direction": turn_direction,
+        "swing_cm": round(float(swing_m) * 100.0, 1),
+        "delivery_type": delivery_type,
+        "spin_type": spin_type,
+        "swing_type": swing_type,
+        "bowler_style": style,
+        "bounce_index": int(bounce) if bounce is not None else None,
+        "turn_measurable": bool(turn_reliable),
+        "batsman_hand": hand,
+    }
+
+
+# --------------------------------------------------------------------------- video tracks
+def analyze_video_track(
+    track: List[Dict[str, float]],
+    fps: float,
+    frame_w: int,
+    frame_h: int,
+    pitch_length_m: Optional[float] = None,
+    batsman_hand: str = "RIGHT",
+    ball_diameter_m: float = BALL_DIAMETER_M,
+    timestamps: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    """
+    track: [{"frame", "x", "y", "size", "conf"}, ...] for ONE delivery (release -> bat),
+    in original-video pixels, as produced by ai.trajectory.
+    timestamps: optional per-frame times in seconds (exact timing for variable-fps phone videos).
+    """
+    if not track or len(track) < 5 or fps <= 0:
+        out = _fallback()
+        out.update({"speed_kmh": 0.0, "flight_time_s": 0.0})
+        return out
+
+    pitch_length_m = float(pitch_length_m or DEFAULT_PITCH_LENGTH_M)
+    distance_m = max(1.0, pitch_length_m - 2 * CREASE_OFFSET_M)
+
+    fr = np.array([p["frame"] for p in track], dtype=float)
+    px = np.array([p["x"] for p in track], dtype=float)
+    py = np.array([p["y"] for p in track], dtype=float)
+    sz = np.array([max(1.0, p.get("size", 10.0)) for p in track], dtype=float)
+    if timestamps is not None and len(timestamps) > int(fr[-1]):
+        ts = np.asarray(timestamps, dtype=float)
+        t = ts[fr.astype(int)] - ts[int(fr[0])]
+    else:
+        t = (fr - fr[0]) / fps
+    T = float(t[-1])
+    if T <= 0:
+        out = _fallback()
+        out.update({"speed_kmh": 0.0, "flight_time_s": 0.0})
+        return out
+
+    # ---- speed: time of flight over the release->batsman distance ----
+    speed_mps = distance_m / T
+    speed_kmh = speed_mps * 3.6
+
+    # ---- bounce ----
+    bounce = find_bounce(t, py)
+
+    # ---- depth from apparent ball size (1/size is linear in depth) ----
+    inv = 1.0 / sz
+    # Depth is linear in time, with the ball keeping ~90% of its speed through the bounce.
+    tau = t.copy()
+    if bounce is not None:
+        tau = t - (1.0 - BOUNCE_SPEED_RETENTION) * np.maximum(0.0, t - t[bounce])
+    coef = _robust_polyfit(tau, inv, 1)
+    inv_fit = np.clip(np.polyval(coef, tau), 1e-4, None)
+    size_ratio = float(inv_fit[0] / inv_fit[-1])          # >1 ball approaches the camera
+    approaching = size_ratio >= 1.0
+    depth_ok = max(size_ratio, 1.0 / size_ratio) >= 1.3
+
+    cx = frame_w / 2.0
+    # Sideways metres: the ball's own apparent size is the local metres-per-pixel
+    # scale (ball diameter / box size), smoothed by the 1/size fit. This is
+    # independent of focal length and of where the camera stands.
+    X_cam = (px - cx) * ball_diameter_m * inv_fit * BALL_BOX_SCALE
+    # Along-the-pitch metres: from time (speed is constant in the air and drops
+    # ~10% at the bounce); far more reliable than depth from box size, because
+    # boxes of tiny, blurred far-away balls are inflated.
+    along = distance_m * tau / max(1e-9, tau[-1])
+
+    # image right == bowler's-view right when the camera is behind the bowler,
+    # and the opposite when the camera is behind the batsman (ball approaching)
+    L = -X_cam if approaching else X_cam
+    # measure deviation relative to the delivery line (release -> bounce / end)
+    ref = bounce if bounce is not None else len(L) - 1
+    if along[ref] > 1e-3:
+        slope = (L[ref] - L[0]) / (along[ref] - along[0] + 1e-9)
+        L = L - L[0] - slope * (along - along[0])
+
+    res = _classify(L, along, bounce, batsman_hand, speed_kmh)
+
+    n = len(track)
+    span = fr[-1] - fr[0] + 1
+    conf = 0.35 + 0.35 * min(1.0, n / 25.0) + 0.2 * (n / span) + (0.1 if depth_ok else 0.0)
+    if not approaching:
+        conf -= 0.15   # camera behind the bowler: ball gets tiny, lateral noise is higher
+    res.update({
+        "speed_kmh": round(speed_kmh, 1),
+        "flight_time_s": round(T, 3),
+        "release_frame": int(fr[0]),
+        "arrival_frame": int(fr[-1]),
+        "bounce_frame": int(fr[bounce]) if bounce is not None else None,
+        "bounce_point_px": [round(float(px[bounce]), 1), round(float(py[bounce]), 1)] if bounce is not None else None,
+        "distance_m": round(distance_m, 2),
+        "pitch_length_m": round(pitch_length_m, 2),
+        "camera_end": "batsman" if approaching else "bowler",
+        "size_trend_clear": bool(depth_ok),
+        "track_points": n,
+        "confidence": round(float(min(0.98, conf)), 2),
+    })
+    return res
+
+
+# --------------------------------------------------------------------------- generic / legacy
 def analyze_delivery(
     trajectory_points: List[Any],
     fps: float = 30.0,
     pixel_to_meter: float = 0.025,
     batsman_hand: str = "RIGHT",
-    speed_kmh: Optional[float] = None
+    speed_kmh: Optional[float] = None,
+    frame_size: Optional[tuple] = None,
+    pitch_length_m: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Analyzes ball movement (Angle of Deviation, Swing, Turn, Delivery Type)
-    directly from tracked 2D optical trajectory points.
-    Does NOT require a pitch map or ground calibration.
+    Backwards-compatible entry point.
+      * image track dicts with "frame" (and "size")  -> analyze_video_track
+      * pitch-frame dicts {"x": lateral m, "y": along m, "py": pixel y}
+      * plain (x, y) pixel tuples (live camera)      -> pixel approximation
     """
-    hand = batsman_hand.upper().strip() if batsman_hand else "RIGHT"
-    if hand not in ("RIGHT", "LEFT"):
-        hand = "RIGHT"
+    if not trajectory_points or len(trajectory_points) < 4:
+        return _fallback()
 
-    fallback = {
-        "status": "insufficient_data",
-        "deviation_angle_deg": 0.0,
-        "turn_angle_deg": 0.0,
-        "turn_direction": "Straight",
-        "swing_cm": 0.0,
-        "delivery_type": "STRAIGHT",
-        "spin_type": "NONE",
-        "swing_type": "NONE",
-        "confidence": 0.0
-    }
+    first = trajectory_points[0]
+    if isinstance(first, dict) and "frame" in first:
+        w, h = frame_size or (1280, 720)
+        return analyze_video_track(trajectory_points, fps, w, h, pitch_length_m, batsman_hand)
 
-    if trajectory_points is None or len(trajectory_points) < 4:
-        return fallback
+    if isinstance(first, dict) and "x" in first and "y" in first and "py" in first:
+        L = np.array([float(p["x"]) for p in trajectory_points])
+        D = np.array([float(p["y"]) for p in trajectory_points])
+        py = np.array([float(p["py"]) for p in trajectory_points])
+        bounce = find_bounce(D, py)
+        if bounce is None:
+            bounce = int(np.argmax(py)) if 0 < int(np.argmax(py)) < len(py) - 1 else None
+        res = _classify(L - L[0], D - D[0], bounce, batsman_hand, speed_kmh)
+        res["confidence"] = round(min(0.95, 0.5 + 0.05 * len(L)), 2)
+        return res
 
-    # Extract clean (px, py) float coordinates
+    # plain pixel points (live camera): treat image as seen from behind the batsman
     pts = []
     for p in trajectory_points:
         if isinstance(p, dict):
-            pts.append([float(p.get("px", p.get("x", 0))), float(p.get("py", p.get("y", 0)))])
-        elif isinstance(p, (list, tuple)) and len(p) >= 2:
-            pts.append([float(p[0]), float(p[1])])
-
-    if len(pts) < 4:
-        return fallback
-
-    pts = np.array(pts, dtype=np.float64)
-
-    # Filter out extreme tracking teleport spikes (> 50 pixels jump between consecutive frames)
-    cleaned = [pts[0]]
-    for i in range(1, len(pts)):
-        dist = np.linalg.norm(pts[i] - cleaned[-1])
-        if dist < 50.0:
-            cleaned.append(pts[i])
-    pts = np.array(cleaned, dtype=np.float64)
-    n = len(pts)
-
-    if n < 4:
-        return fallback
-
-    # Check for bat impact, rebound or sharp reversal near batsman
-    max_y_idx = int(np.argmax(pts[:, 1]))
-    if max_y_idx >= 4 and max_y_idx < n - 1:
-        if pts[max_y_idx, 1] - pts[-1, 1] > 30.0:
-            pts = pts[:max_y_idx + 1]
-            n = len(pts)
-
-    if n < 4:
-        return fallback
-
-    # Check for bat impact, rebound or sharp angle reversal > 70 degrees
-    truncated_end = n
-    for i in range(max(3, int(n * 0.3)), n - 1):
-        v1 = pts[i] - pts[i - 2]
-        v2 = pts[i + 1] - pts[i]
-        l1, l2 = np.linalg.norm(v1), np.linalg.norm(v2)
-        if l1 > 3.0 and l2 > 3.0:
-            dot = np.clip(np.dot(v1, v2) / (l1 * l2), -1.0, 1.0)
-            angle = np.degrees(np.arccos(dot))
-            if angle > 70.0:  # Bat contact or sharp rebound
-                truncated_end = i + 1
-                break
-
-    pts = pts[:truncated_end]
-
-    # Isolate delivery release point: remove pre-release bowler windup moving opposite to main flight
-    if len(pts) >= 6:
-        main_dir = pts[-1] - pts[len(pts) // 2]
-        main_len = np.linalg.norm(main_dir)
-        if main_len > 10.0:
-            main_u = main_dir / main_len
-            start_idx = 0
-            for i in range(len(pts) - 4):
-                step_dir = pts[i + 1] - pts[i]
-                step_len = np.linalg.norm(step_dir)
-                if step_len > 1.0:
-                    proj = np.dot(step_dir / step_len, main_u)
-                    if proj > 0.4:
-                        start_idx = i
-                        break
-            pts = pts[start_idx:]
-
-    # Remove stationary points (e.g. bowler holding ball before delivery or keeper holding ball)
-    if len(pts) > 0:
-        moving_pts = [pts[0]]
-        for i in range(1, len(pts)):
-            if np.linalg.norm(pts[i] - moving_pts[-1]) >= 1.5:
-                moving_pts.append(pts[i])
-        pts = np.array(moving_pts, dtype=np.float64)
-
-    n = len(pts)
-
-    if n < 4:
-        return fallback
-
-    # 1. Detect bounce / inflection point
-    # Cricket pitch bounce occurs in landing zone (20% to 85% of delivery flight)
-    start_search = max(2, int(n * 0.20))
-    end_search = min(n - 2, int(n * 0.85))
-
-    bounce_idx = None
-    best_turn = 0.0
-    turn_signed = 0.0
-
-    for i in range(start_search, end_search):
-        pre_vec = pts[i] - pts[0]
-        post_vec = pts[-1] - pts[i]
-        l_pre, l_post = np.linalg.norm(pre_vec), np.linalg.norm(post_vec)
-        if l_pre > 5.0 and l_post > 5.0:
-            a_pre = np.degrees(np.arctan2(pre_vec[0], pre_vec[1]))
-            a_post = np.degrees(np.arctan2(post_vec[0], post_vec[1]))
-            diff = (a_post - a_pre + 180) % 360 - 180
-            abs_diff = abs(diff)
-            # Standard cricket spin turn off pitch is between 1.0° and 35°
-            if 1.0 <= abs_diff <= 35.0 and abs_diff > best_turn:
-                best_turn = abs_diff
-                turn_signed = diff
-                bounce_idx = i
-
-    deviation_angle_deg = round(best_turn, 1)
-
-    # 2. Aerodynamic Air Swing / Drift (strictly BEFORE bounce)
-    if bounce_idx is not None and bounce_idx >= 2:
-        pre_segment = pts[:bounce_idx + 1]
-    else:
-        pre_segment = pts[:max(3, int(n * 0.6))]
-
-    p_start = pre_segment[0]
-    p_end = pre_segment[-1]
-    chord_vec = p_end - p_start
-    chord_len = np.linalg.norm(chord_vec)
-
-    swing_cm = 0.0
-    swing_type = "NONE"
-    if chord_len > 10.0 and len(pre_segment) >= 3:
-        chord_u = chord_vec / chord_len
-        # Perpendicular unit normal (pointing inward to RHB)
-        norm_u = np.array([-chord_u[1], chord_u[0]])
-        max_dev_px = 0.0
-
-        for pt in pre_segment[1:-1]:
-            d = np.dot(pt - p_start, norm_u)
-            if abs(d) > abs(max_dev_px):
-                max_dev_px = d
-
-        swing_cm = round(abs(max_dev_px) * pixel_to_meter * 100.0, 1)
-        if swing_cm >= 2.0:
-            if max_dev_px > 0:
-                swing_type = "INSWING" if hand == "RIGHT" else "OUTSWING"
-            else:
-                swing_type = "OUTSWING" if hand == "RIGHT" else "INSWING"
-
-    # 3. Spin & Pitch Turn Classification
-    # In cricket camera perspective (looking towards batsman crease):
-    # For a Right-Handed Batsman (RHB), batsman is on the left (leg side).
-    # Lateral motion to the left (dx < 0) moves INWARD to RHB (Off Break / Off Spin / Inswing).
-    # Lateral motion to the right (dx > 0) moves AWAY from RHB (Leg Break / Leg Spin / Outswing).
-    dx_total = float(pts[-1, 0] - pts[0, 0])
-    is_inward = (dx_total < 0) if hand == "RIGHT" else (dx_total > 0)
-
-    if deviation_angle_deg >= 1.0:
-        if is_inward:
-            spin_type = "OFF_SPIN"
-            turn_direction = "Off Break (Turns Inward to RHB)" if hand == "RIGHT" else "Leg Break (Turns Away from LHB)"
+            pts.append((float(p.get("px", p.get("x", 0))), float(p.get("py", p.get("y", 0)))))
         else:
-            spin_type = "LEG_SPIN"
-            turn_direction = "Leg Break (Turns Away from RHB)" if hand == "RIGHT" else "Off Break (Turns Inward to LHB)"
-    else:
-        spin_type = "NONE"
-        if swing_type == "INSWING":
-            turn_direction = "Inswing (Shapes Inward to RHB)" if hand == "RIGHT" else "Outswing (Shapes Away from LHB)"
-        elif swing_type == "OUTSWING":
-            turn_direction = "Outswing (Shapes Away from RHB)" if hand == "RIGHT" else "Inswing (Shapes Inward to LHB)"
-        else:
-            turn_direction = "Straight Line"
-
-    # 4. Delivery Type Classification
-    measured_speed = speed_kmh if speed_kmh and speed_kmh > 0 else 80.0
-
-    if measured_speed <= 105.0:
-        # Spin / Slow bowling
-        if deviation_angle_deg >= 1.0:
-            delivery_type = spin_type
-        elif swing_type in ("INSWING", "OUTSWING"):
-            delivery_type = swing_type
-        elif swing_type != "NONE" and swing_cm >= 3.0:
-            delivery_type = "ARM_BALL"
-        else:
-            delivery_type = "STRAIGHT"
-    else:
-        # Fast / Medium-Pace bowling
-        if deviation_angle_deg >= 1.5:
-            delivery_type = "OFF_CUTTER" if spin_type == "OFF_SPIN" else "LEG_CUTTER"
-        elif swing_type in ("INSWING", "OUTSWING"):
-            delivery_type = swing_type
-        else:
-            delivery_type = "SEAM_STRAIGHT"
-
-    confidence = min(0.98, max(0.60, round(0.5 + (len(pts) / 30.0) * 0.45, 2)))
-
-    return {
-        "status": "ok",
-        "deviation_angle_deg": float(deviation_angle_deg),
-        "turn_angle_deg": float(deviation_angle_deg),
-        "turn_direction": turn_direction,
-        "swing_cm": float(swing_cm),
-        "delivery_type": delivery_type,
-        "spin_type": spin_type,
-        "swing_type": swing_type,
-        "confidence": float(confidence)
-    }
+            pts.append((float(p[0]), float(p[1])))
+    pts = np.array(pts)
+    if len(pts) < 5:
+        return _fallback()
+    t = np.arange(len(pts), dtype=float) / max(1.0, fps)
+    bounce = find_bounce(t, pts[:, 1])
+    L = -(pts[:, 0] - pts[0, 0]) * pixel_to_meter
+    along = np.linspace(0.0, max(1.0, np.ptp(pts[:, 1]) * pixel_to_meter * 4), len(pts))
+    ref = bounce if bounce is not None else len(L) - 1
+    slope = (L[ref] - L[0]) / (along[ref] - along[0] + 1e-9)
+    L = L - slope * along
+    res = _classify(L, along, bounce, batsman_hand, speed_kmh)
+    res["confidence"] = 0.5
+    return res

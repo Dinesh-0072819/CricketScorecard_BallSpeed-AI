@@ -9,6 +9,19 @@ import {
 export default function VideoUpload() {
   const [file, setFile] = useState(null);
   const [maxSpeedLimit, setMaxSpeedLimit] = useState(70.0);
+  // Stump-to-stump pitch length used for time-of-flight speed (22 yards = 20.12 m).
+  const [pitchLength, setPitchLength] = useState(() => {
+    try { return localStorage.getItem('cricspeed_pitch_length_m') || '20.12'; } catch (e) { return '20.12'; }
+  });
+  const [batsmanHand, setBatsmanHand] = useState(() => {
+    try { return localStorage.getItem('cricspeed_batsman_hand') || 'RIGHT'; } catch (e) { return 'RIGHT'; }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('cricspeed_pitch_length_m', String(pitchLength));
+      localStorage.setItem('cricspeed_batsman_hand', batsmanHand);
+    } catch (e) { /* storage unavailable */ }
+  }, [pitchLength, batsmanHand]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [processingProgress, setProcessingProgress] = useState(0);
@@ -116,6 +129,8 @@ export default function VideoUpload() {
     const formData = new FormData();
     formData.append('video', file);
     formData.append('max_speed', maxSpeedLimit);
+    formData.append('pitch_length_m', pitchLength);
+    formData.append('batsman_hand', batsmanHand);
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/upload', true);
@@ -235,7 +250,9 @@ export default function VideoUpload() {
         }
         setIsProcessing(false);
         setUploadPhase('error');
-        setError(`Server returned status error ${xhr.status}.`);
+        let serverMsg = '';
+        try { serverMsg = JSON.parse(xhr.responseText).message || ''; } catch (e) { /* not JSON */ }
+        setError(serverMsg ? `Server error ${xhr.status}: ${serverMsg}` : `Server returned status error ${xhr.status}.`);
       }
     };
 
@@ -527,7 +544,7 @@ export default function VideoUpload() {
             </label>
           </div>
 
-          <div style={{ display: 'flex', gap: '20px', alignItems: 'center', marginBottom: '20px' }}>
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap' }}>
             <div style={{ flex: 1 }}>
               <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px', fontWeight: '700' }}>
                 Speed Threshold Limit (km/h)
@@ -540,6 +557,38 @@ export default function VideoUpload() {
                 style={{ width: '100%' }}
                 disabled={isProcessing}
               />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px', fontWeight: '700' }}
+                     title="Stump-to-stump distance of your pitch. Speed = (pitch length - 2.44 m) / flight time.">
+                Pitch Length (m)
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                min="8"
+                max="25"
+                value={pitchLength}
+                onChange={(e) => setPitchLength(e.target.value)}
+                className="input-premium"
+                style={{ width: '100%' }}
+                disabled={isProcessing}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '6px', fontWeight: '700' }}>
+                Batsman
+              </label>
+              <select
+                value={batsmanHand}
+                onChange={(e) => setBatsmanHand(e.target.value)}
+                className="input-premium"
+                style={{ width: '100%' }}
+                disabled={isProcessing}
+              >
+                <option value="RIGHT">Right-handed</option>
+                <option value="LEFT">Left-handed</option>
+              </select>
             </div>
             <button
               type="submit"

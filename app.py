@@ -77,12 +77,26 @@ class VideoProcessorProxy:
 
 video_processor = VideoProcessorProxy()
 
+
+def _live_detect(frame, tracker):
+    """Ball detections for one live frame using the shared detector (ONNX / PT / tiled)."""
+    last_pos = None
+    try:
+        if tracker is not None and tracker.tracks:
+            t = max(tracker.tracks, key=lambda tr: len(tr.history))
+            if t.time_since_update <= 3:
+                last_pos = (float(t.kf.x[0, 0]), float(t.kf.x[1, 0]))
+    except Exception:
+        last_pos = None
+    dets = video_processor.detect_live(frame, last_pos=last_pos)
+    return [(int(d[0]), int(d[1])) for d in dets], [float(d[4]) for d in dets]
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "2.8-calibrated-94.6-offspin",
-        "commit": "8d030e4",
+        "version": "3.0-tiled-detection-tof-speed",
+        "detector_backend": getattr(getattr(video_processor, "detector", None), "backend", None),
         "custom_weights": getattr(video_processor, "is_custom_model", False),
         "roboflow_gpu": getattr(video_processor, "use_roboflow", False),
         "roboflow_status": getattr(video_processor, "roboflow_status_msg", "N/A")
@@ -180,27 +194,7 @@ def generate_frames():
 
             # Perform live ball detection and Kalman tracking if active
             if live_tracker is not None:
-                results = video_processor.model.predict(
-                    source=frame,
-                    imgsz=640,
-                    conf=0.15,
-                    iou=0.40,
-                    verbose=False
-                )
-
-                detections = []
-                scores = []
-
-                for result in results:
-                    if result.boxes is None:
-                        continue
-                    for box in result.boxes:
-                        confidence = float(box.conf[0])
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-                        detections.append((cx, cy))
-                        scores.append(confidence)
+                detections, scores = _live_detect(frame, live_tracker)
 
                 active_tracks = live_tracker.update(detections, scores)
                 
@@ -442,13 +436,23 @@ def upload_video():
         max_speed = float(
             request.form.get("max_speed", app.config.get("MAX_SPEED", 70.0))
         )
+        batsman_hand = (request.form.get("batsman_hand") or os.getenv("BATSMAN_HAND", "RIGHT")).upper()
+        try:
+            pitch_length_m = float(request.form.get("pitch_length_m") or app.config.get("PITCH_LENGTH_M") or 0) or None
+        except ValueError:
+            pitch_length_m = None
 
+        import re, time as _time
+        base, ext = os.path.splitext(os.path.basename(file.filename))
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_") or "video"
+        safe_name = f"{safe}_{int(_time.time())}{ext.lower() or '.mp4'}"
+        os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
         input_path = os.path.join(
             app.config["UPLOAD_FOLDER"],
-            file.filename
+            safe_name
         )
 
-        output_filename = "processed_" + file.filename
+        output_filename = "processed_" + os.path.splitext(safe_name)[0] + ".mp4"
         output_path = os.path.join(
             app.config["UPLOAD_FOLDER"],
             output_filename
@@ -488,7 +492,9 @@ def upload_video():
                     input_video=input_path,
                     output_video=output_path,
                     max_speed=max_speed,
-                    progress_callback=on_processing_progress
+                    progress_callback=on_processing_progress,
+                    batsman_hand=batsman_hand,
+                    pitch_length_m=pitch_length_m
                 )
 
                 # Save tracking record to database (fail-safe)
@@ -503,7 +509,7 @@ def upload_video():
                 final_data = {
                     "status": "success",
                     "video_url": f"/uploads/{output_filename}",
-                    "original_video_url": f"/uploads/{file.filename}",
+                    "original_video_url": f"/uploads/{safe_name}",
                     "detected_speed": float(result["speed"]),
                     "max_speed": max_speed,
                     "ball_status": result["status"],
@@ -511,7 +517,14 @@ def upload_video():
                     "turn_angle": float(result.get("turn_angle", 0.0)),
                     "turn_direction": result.get("turn_direction", "Straight"),
                     "swing_cm": float(result.get("swing_cm", 0.0)),
-                    "delivery_type": result.get("delivery_type", "STRAIGHT")
+                    "delivery_type": result.get("delivery_type", "STRAIGHT"),
+                    "analysis": result.get("analysis", {}),
+                    "engine": result.get("engine"),
+                    "flight_time_s": result.get("analysis", {}).get("flight_time_s"),
+                    "bounce_frame": result.get("analysis", {}).get("bounce_frame"),
+                    "pitch_length_m": result.get("analysis", {}).get("pitch_length_m"),
+                    "batsman_hand": batsman_hand,
+                    "ball_found": result.get("analysis", {}).get("status") == "ok"
                 }
 
                 write_progress({
@@ -524,6 +537,8 @@ def upload_video():
                 })
                 print("Background video processing completed successfully.")
             except Exception as bg_err:
+                import traceback
+                traceback.print_exc()
                 print(f"Background video processing error: {bg_err}")
                 write_progress({
                     "status": "error",
@@ -545,8 +560,10 @@ def upload_video():
         }), 202
 
     except Exception as e:
-        print(f"Video upload error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        print(f"Video upload error: {type(e).__name__}: {e}")
+        return jsonify({"status": "error", "message": f"Upload failed: {type(e).__name__}: {e}"}), 500
 
 # ----------------------------------
 # Serve Uploaded & Sample Videos
@@ -626,9 +643,11 @@ def analytics_data():
 
 @app.route("/save_config", methods=["POST"])
 def save_config():
-    data = request.json
-    max_speed = data.get("max_speed")
-    app.config["MAX_SPEED"] = float(max_speed)
+    data = request.json or {}
+    if data.get("max_speed") is not None:
+        app.config["MAX_SPEED"] = float(data.get("max_speed"))
+    if data.get("pitch_length_m"):
+        app.config["PITCH_LENGTH_M"] = float(data.get("pitch_length_m"))
     return jsonify({"status": "success"})
 
 @app.route("/process_frame", methods=["POST"])
@@ -665,27 +684,7 @@ def process_frame():
     h, w, c = annotated.shape
     
     # Run ball detection & tracking
-    results = video_processor.model.predict(
-        source=frame,
-        imgsz=640,
-        conf=0.15,
-        iou=0.40,
-        verbose=False
-    )
-
-    detections = []
-    scores = []
-
-    for result in results:
-        if result.boxes is None:
-            continue
-        for box in result.boxes:
-            confidence = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cx = (x1 + x2) // 2
-            cy = (y1 + y2) // 2
-            detections.append((cx, cy))
-            scores.append(confidence)
+    detections, scores = _live_detect(frame, live_tracker)
 
     active_tracks = live_tracker.update(detections, scores)
     

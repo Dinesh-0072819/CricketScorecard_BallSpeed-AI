@@ -34,3 +34,13 @@ class Config:
     YOLO_CONF_LOW = 0.15
     YOLO_IOU = 0.40
     YOLO_IMGSZ = 640
+
+
+# ---------------------------------------------------------------------------
+# Delivery analysis thresholds (module level: imported by ai/track_cleaning.py
+# and tests). Values are shared with ai/delivery_analysis.py.
+# ---------------------------------------------------------------------------
+from ai.delivery_analysis import TURN_MIN_DEG, SWING_MIN_M, DEFAULT_PITCH_LENGTH_M  # noqa: E402,F401
+
+MIN_TRACK_POINTS = 5
+MIN_PITCH_SPAN_M = 3.0
