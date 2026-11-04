@@ -29,7 +29,7 @@ from ai.ball_detector import BallDetector
 from ai.trajectory import link_detections, select_delivery, trim_delivery
 
 SAMPLE_FPS = float(os.getenv("CLOUD_SAMPLE_FPS", "30"))
-CONF = 0.15
+CONF = float(os.getenv("CLOUD_CONF", "0.05"))
 
 
 def _clean_ts(ts: List[float], fps: float) -> List[float]:
@@ -123,105 +123,166 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
     }
 
 
-def cloud_refine_ends(video_path: str, cloud, track: List[Dict], stride: int, W: int, H: int,
-                      fps: float = 30.0) -> List[Dict]:
+def _crop_dets(cloud, frame, center, zoom_rel, train_scale, W, H):
+    """Send one 640x640 crop around `center`; the ball appears zoom_rel x its training size.
+    Returns detections in full-frame pixels."""
+    side = int(min(640.0 / (zoom_rel * train_scale), W, H))
+    zoom = 640.0 / side
+    x0 = int(np.clip(center[0] - side / 2, 0, max(0, W - side)))
+    y0 = int(np.clip(center[1] - side / 2, 0, max(0, H - side)))
+    crop = cv2.resize(frame[y0:y0 + side, x0:x0 + side], (640, 640),
+                      interpolation=cv2.INTER_CUBIC if zoom > 1 else cv2.INTER_AREA)
+    res, _ = cloud.detect_frame(crop)
+    out = []
+    for d in res or []:
+        bw, bh = d[2] / zoom, d[3] / zoom
+        if d[4] < CONF or max(bw, bh) > 0.06 * max(W, H) or max(bw, bh) / max(1e-3, min(bw, bh)) > 2.2:
+            continue
+        out.append([x0 + d[0] / zoom, y0 + d[1] / zoom, bw, bh, d[4]])
+    return out
+
+
+def _pt(f, d):
+    return {"frame": int(f), "x": float(d[0]), "y": float(d[1]), "size": float(min(d[2], d[3])), "conf": float(d[4])}
+
+
+def cloud_follow(video_path: str, cloud, track: List[Dict], W: int, H: int, fps: float = 30.0,
+                 total_frames: int = 0) -> List[Dict]:
     """
-    Precision pass for the time of flight, one parallel round of Roboflow calls:
-      * release: ZOOMED crops (2x) along the path back towards the bowler's hand,
-        because just after release the ball is only a few pixels wide;
-      * arrival: the unsampled frames right after the end of the track.
+    Dense pass along the delivery with ZOOMED crops (Roboflow shrinks a whole frame to
+    640 px, where a far / fast ball is only a few pixels and often missed):
+      * gaps inside the track: crops at 1.5x training scale around the interpolated position;
+      * release: walk back towards the bowler's hand (1.5x and 1.0x crops), up to 0.35 s;
+      * after the last point: follow the ball forward in rounds of parallel requests
+        (wide 1.0x crops around the extrapolated position) until it is lost - this
+        recovers the bounce and the arrival at the batsman, which sets the speed.
     """
     if len(track) < 3:
         return track
     first, last = int(track[0]["frame"]), int(track[-1]["frame"])
-    p0 = np.array([track[0]["x"], track[0]["y"]])
-    p1 = np.array([track[1]["x"], track[1]["y"]])
-    v0 = (p1 - p0) / max(1, track[1]["frame"] - first)
-    pe = np.array([track[-1]["x"], track[-1]["y"]])
-    pe1 = np.array([track[-2]["x"], track[-2]["y"]])
-    ve = (pe - pe1) / max(1, last - track[-2]["frame"])
+    back = max(4, int(round(0.35 * fps)))
+    fwd = max(8, int(round(0.8 * fps)))
+    lo, hi = max(0, first - back), last + fwd
+    if total_frames:
+        hi = min(hi, total_frames - 1)
 
-    back = max(4, int(round(0.3 * fps)))                       # look back ~0.3 s
-    back_frames = [f for f in range(first - 1, first - back - 1, -1) if f >= 0]
-    end_frames = [f for f in range(last + 1, last + stride + 1) if f % stride != 0]
-    need = set(back_frames) | set(end_frames)
-    if not need:
-        return track
-
+    # keep the window's frames as JPEG in memory (small; Render free has 512 MB)
+    store = {}
     cap = cv2.VideoCapture(video_path)
-    frames = {}
     i = 0
-    hi = max(need)
     while i <= hi:
         if not cap.grab():
             break
-        if i in need:
+        if i >= lo:
             ok, fr = cap.retrieve()
             if ok:
-                frames[i] = fr
+                store[i] = cv2.imencode(".jpg", fr, [int(cv2.IMWRITE_JPEG_QUALITY), 92])[1]
         i += 1
     cap.release()
+    hi = min(hi, max(store) if store else hi)
 
-    # Two crops per frame, like the local engine: the ball at 1.5x and at 1.0x the
-    # size the model was trained on (1280 long side). Tiny far balls show up in
-    # the zoomed one, blurred ones in the other.
+    def frame(f):
+        return cv2.imdecode(store[f], cv2.IMREAD_COLOR)
+
     train_scale = float(os.getenv("BALL_DETECT_LONG_SIDE", "1280")) / float(max(W, H))
-
-    def crop_job(f, zoom_rel):
-        side = int(min(640.0 / (zoom_rel * train_scale), W, H))   # crop side in original pixels
-        zoom = 640.0 / side
-        guess = p0 - v0 * (first - f)
-        x0 = int(np.clip(guess[0] - side / 2, 0, max(0, W - side)))
-        y0 = int(np.clip(guess[1] - side / 2, 0, max(0, H - side)))
-        crop = cv2.resize(frames[f][y0:y0 + side, x0:x0 + side], (640, 640),
-                          interpolation=cv2.INTER_CUBIC if zoom > 1 else cv2.INTER_AREA)
-        res, err = cloud.detect_frame(crop)
-        if not res:
-            return f, []
-        return f, [[x0 + d[0] / zoom, y0 + d[1] / zoom, d[2] / zoom, d[3] / zoom, d[4]] for d in res]
-
-    def full_job(f):
-        res, err = cloud.detect_frame(frames[f])
-        return f, BallDetector._filter(res or [], (H, W))
-
-    results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=cloud.workers) as ex:
-        jobs = [ex.submit(crop_job, f, z) for f in back_frames if f in frames for z in (1.5, 1.0)]
-        jobs += [ex.submit(full_job, f) for f in end_frames if f in frames]
-        for j in concurrent.futures.as_completed(jobs):
-            f, dets = j.result()
-            results.setdefault(f, []).extend(dets)
-
     by_f = {int(p["frame"]): dict(p) for p in track}
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=cloud.workers)
 
-    def pt(f, d):
-        return {"frame": f, "x": float(d[0]), "y": float(d[1]), "size": float(min(d[2], d[3])), "conf": float(d[4])}
+    def run(jobs):
+        """jobs: list of (frame, center, zoom). Returns {frame: [dets]} (all zooms merged)."""
+        futs = {ex.submit(_crop_dets, cloud, frame(f), c, z, train_scale, W, H): f
+                for f, c, z in jobs if f in store}
+        out = {}
+        for fu in concurrent.futures.as_completed(futs):
+            try:
+                out.setdefault(futs[fu], []).extend(fu.result())
+            except Exception:
+                pass
+        for f, dl in out.items():
+            seen.extend((f, d[0], d[1]) for d in dl)
+        return out
 
-    # walk back from the first tracked point, re-estimating the velocity (far balls move fewer pixels)
+    def moving(f, dl):
+        return [d for d in dl if not is_static(f, d)]
+
+    seen = []          # (frame, x, y) of every crop detection -> static-object suppression
+
+    def is_static(f, d):
+        # something that sits at the same spot in 3+ other frames is not a flying ball
+        # (stumps, a logo, a ball lying on the ground)
+        # (frames at least 3 apart, so a slow ball near the batsman is not mistaken for one)
+        frames_hit = {g for g, x, y in seen if abs(g - f) >= 3 and abs(x - d[0]) < 5 and abs(y - d[1]) < 5}
+        return len(frames_hit) >= 3
+
+    def nearest(dets, guess, gate):
+        dets = [d for d in dets if math.hypot(d[0] - guess[0], d[1] - guess[1]) < gate]
+        return min(dets, key=lambda d: math.hypot(d[0] - guess[0], d[1] - guess[1])) if dets else None
+
+    # ---- 1. gaps inside the track + release walk-back (one parallel round)
+    fr_known = sorted(by_f)
+    xs = np.array([by_f[f]["x"] for f in fr_known]); ys = np.array([by_f[f]["y"] for f in fr_known])
+    # every frame of the span: fill the gaps AND re-measure the coarse points (a ball
+    # that is ~8 px in the shrunk full frame is located far more precisely in a zoomed crop)
+    gaps = list(range(first, last + 1))
+    p0 = np.array([xs[0], ys[0]]); v0 = (np.array([xs[1], ys[1]]) - p0) / max(1, fr_known[1] - first)
+    back_frames = [f for f in range(first - 1, lo - 1, -1)]
+    jobs = [(f, (np.interp(f, fr_known, xs), np.interp(f, fr_known, ys)), 1.5) for f in gaps]
+    jobs += [(f, p0 - v0 * (first - f), z) for f in back_frames for z in (1.5, 1.0)]
+    res = run(jobs)
+    for f in gaps:
+        # leave-one-out guess: a coarse point may itself be a distractor
+        o = [g for g in fr_known if g != f] or fr_known
+        guess = (np.interp(f, o, [by_f[g]["x"] for g in o]), np.interp(f, o, [by_f[g]["y"] for g in o]))
+        d = nearest(moving(f, res.get(f, [])), guess, 12.0 + 1.2 * float(np.linalg.norm(v0)))
+        if d:
+            by_f[f] = _pt(f, d)
+    if first not in by_f:
+        by_f[first] = dict(track[0])
+    p0 = np.array([by_f[first]["x"], by_f[first]["y"]])
     cur_f, cur, v, misses = first, p0.copy(), v0.copy(), 0
     for f in back_frames:
-        dets = [d for d in results.get(f, []) if d[4] >= 0.05 and max(d[2], d[3]) < 0.06 * max(W, H)]
         gap = cur_f - f
         guess = cur - v * gap
-        gate = 8.0 + 0.7 * float(np.linalg.norm(v)) * gap
-        dets = [d for d in dets if math.hypot(d[0] - guess[0], d[1] - guess[1]) < gate]
-        if dets:
-            d = min(dets, key=lambda d: math.hypot(d[0] - guess[0], d[1] - guess[1]))
+        d = nearest([d for d in moving(f, res.get(f, [])) if d[4] >= 0.05], guess, 8.0 + 0.7 * float(np.linalg.norm(v)) * gap)
+        if d:
             new = np.array(d[:2], dtype=float)
             v = 0.5 * v + 0.5 * (cur - new) / gap
             cur_f, cur, misses = f, new, 0
-            by_f[f] = pt(f, d)
+            by_f[f] = _pt(f, d)
         else:
             misses += 1
             if misses >= 4:
                 break
 
-    for f in end_frames:
-        guess = pe + ve * (f - last)
-        gate = 10.0 + 0.8 * float(np.linalg.norm(ve)) * stride
-        dets = [d for d in results.get(f, []) if d[4] >= 0.08 and math.hypot(d[0] - guess[0], d[1] - guess[1]) < gate]
-        if dets:
-            by_f[f] = pt(f, min(dets, key=lambda d: math.hypot(d[0] - guess[0], d[1] - guess[1])))
+    # ---- 2. follow forward in rounds of parallel requests
+    def vel_at_end():
+        fs_ = sorted(by_f)[-3:]
+        a, b = by_f[fs_[0]], by_f[fs_[-1]]
+        return np.array([b["x"] - a["x"], b["y"] - a["y"]]) / max(1, fs_[-1] - fs_[0])
+
+    batch = 6
+    misses = 0
+    f_next = last + 1
+    while f_next <= hi and misses < 8:
+        end_f = max(by_f)
+        pe = np.array([by_f[end_f]["x"], by_f[end_f]["y"]])
+        ve = vel_at_end()
+        frames_b = list(range(f_next, min(hi, f_next + batch - 1) + 1))
+        res = run([(f, pe + ve * (f - end_f), 1.0) for f in frames_b])
+        for f in frames_b:
+            end_f = max(by_f)
+            pe = np.array([by_f[end_f]["x"], by_f[end_f]["y"]])
+            ve = vel_at_end()
+            gap = f - end_f
+            gate = 15.0 + 0.9 * float(np.linalg.norm(ve)) * gap
+            d = nearest(moving(f, res.get(f, [])), pe + ve * gap, gate)
+            if d:
+                by_f[f] = _pt(f, d)
+                misses = 0
+            else:
+                misses += 1
+        f_next = frames_b[-1] + 1
+    ex.shutdown(wait=True)
     return [by_f[f] for f in sorted(by_f)]
 
 
@@ -231,5 +292,5 @@ def build_track(scan: Dict, video_path: str, cloud) -> List[Dict]:
     if best is None:
         return []
     track = trim_delivery(best.as_dicts(), diag, scan["fps"])
-    track = cloud_refine_ends(video_path, cloud, track, scan["stride"], scan["width"], scan["height"], scan["fps"])
+    track = cloud_follow(video_path, cloud, track, scan["width"], scan["height"], scan["fps"], scan["frames"])
     return trim_delivery(track, diag, scan["fps"])

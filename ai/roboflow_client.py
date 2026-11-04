@@ -122,7 +122,7 @@ class RoboflowClient:
     def _post(self, b64: str):
         if self.model:
             url = f"https://detect.roboflow.com/{self.model}"
-            r = self.session.post(url, params={"api_key": self.api_key, "confidence": 10, "overlap": 40},
+            r = self.session.post(url, params={"api_key": self.api_key, "confidence": 5, "overlap": 40},
                                   data=b64, headers={"Content-Type": "application/x-www-form-urlencoded"},
                                   timeout=15)
         else:
