@@ -66,6 +66,15 @@ export default function VideoUpload() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [videoSourceMode, setVideoSourceMode] = useState('processed'); // 'processed' | 'original'
   const [isPlaying, setIsPlaying] = useState(false);
+  // Play the video straight from the user's own file (instant, no download from the
+  // server; Render's free disk can lose the uploaded copy when the instance restarts).
+  const [localVideoUrl, setLocalVideoUrl] = useState(null);
+  useEffect(() => {
+    if (!file) { setLocalVideoUrl(null); return undefined; }
+    const url = URL.createObjectURL(file);
+    setLocalVideoUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
 
   const pollIntervalRef = useRef(null);
 
@@ -942,7 +951,7 @@ export default function VideoUpload() {
                   key={videoSourceMode}
                   controls
                   playsInline
-                  src={videoSourceMode === 'original' ? (result.original_video_url || result.video_url) : result.video_url}
+                  src={(result.overlay_mode === 'client' || videoSourceMode === 'original') && localVideoUrl ? localVideoUrl : (videoSourceMode === 'original' ? (result.original_video_url || result.video_url) : result.video_url)}
                   onPlay={() => setIsPlaying(true)}
                   onPause={() => setIsPlaying(false)}
                   onLoadedMetadata={() => {

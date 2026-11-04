@@ -160,7 +160,7 @@ def cloud_follow(video_path: str, cloud, track: List[Dict], W: int, H: int, fps:
     if len(track) < 3:
         return track
     first, last = int(track[0]["frame"]), int(track[-1]["frame"])
-    back = max(4, int(round(0.35 * fps)))
+    back = max(4, int(round(0.45 * fps)))
     fwd = max(8, int(round(0.8 * fps)))
     lo, hi = max(0, first - back), last + fwd
     if total_frames:
@@ -239,16 +239,37 @@ def cloud_follow(video_path: str, cloud, track: List[Dict], W: int, H: int, fps:
     if first not in by_f:
         by_f[first] = dict(track[0])
     p0 = np.array([by_f[first]["x"], by_f[first]["y"]])
-    cur_f, cur, v, misses = first, p0.copy(), v0.copy(), 0
+    # Walk back towards the bowler's hand. If the track starts just AFTER the bounce
+    # (the ball was missed around the bounce), a straight-line walk-back fails because
+    # the ball changes vertical direction at the bounce: so also allow ONE bounce - the
+    # sideways motion continues, the vertical motion is free. Without this the delivery
+    # starts at the bounce and the speed comes out ~1.5x too high.
+    cur_f, cur, v, misses, crossed = first, p0.copy(), v0.copy(), 0, False
+    n_before = 0
     for f in back_frames:
         gap = cur_f - f
         guess = cur - v * gap
-        d = nearest([d for d in moving(f, res.get(f, [])) if d[4] >= 0.05], guess, 8.0 + 0.7 * float(np.linalg.norm(v)) * gap)
+        cands = [d for d in moving(f, res.get(f, [])) if d[4] >= 0.05]
+        d = nearest(cands, guess, 8.0 + 0.7 * float(np.linalg.norm(v)) * gap)
+        bounce_jump = False
+        if d is None and not crossed:
+            gx = cur[0] - v[0] * gap
+            tol_x = 10.0 + 0.6 * abs(float(v[0])) * gap
+            tol_y = 20.0 + 2.5 * float(np.linalg.norm(v)) * gap + 0.02 * H * gap
+            bc = [c for c in cands if abs(c[0] - gx) < tol_x and 2.0 < abs(c[1] - cur[1]) < tol_y]
+            if bc:
+                d = min(bc, key=lambda c: abs(c[0] - gx))
+                bounce_jump = True
         if d:
             new = np.array(d[:2], dtype=float)
-            v = 0.5 * v + 0.5 * (cur - new) / gap
+            if bounce_jump:
+                v = (cur - new) / gap          # pre-bounce velocity: start fresh
+                crossed = True
+            else:
+                v = 0.5 * v + 0.5 * (cur - new) / gap
             cur_f, cur, misses = f, new, 0
             by_f[f] = _pt(f, d)
+            n_before += 0 if bounce_jump else 1
         else:
             misses += 1
             if misses >= 4:
