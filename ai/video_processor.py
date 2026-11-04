@@ -145,14 +145,21 @@ class VideoProcessor:
             except Exception as e:
                 fs = {"ok": False, "error": str(e)}
             if fs.get("ok"):
-                return self._process_fast(fs, input_video, max_speed, batsman_hand, pitch_length_m, prog)
-            print(f"[FastCloud] Roboflow unavailable ({fs.get('error')}); using the local engine")
-            prog(3, 0, 0, "Roboflow unavailable - using the local AI engine...")
+                res = self._process_fast(fs, input_video, max_speed, batsman_hand, pitch_length_m, prog)
+                if res is not None:
+                    return res
+                print("[FastCloud] Roboflow found no delivery in this video; using the local engine")
+                prog(3, 0, 0, "Cloud found no ball - re-checking with the local AI engine...")
+            else:
+                print(f"[FastCloud] Roboflow unavailable ({fs.get('error')}); using the local engine")
+                prog(3, 0, 0, "Roboflow unavailable - using the local AI engine...")
 
         if self.detector is None and not self.cloud.active:
             return self._empty_result("ERROR: no ball detection model available", max_speed)
 
-        scan = collect_detections(input_video, self.detector, self.cloud, on_scan)
+        # fast cloud mode already tried Roboflow: the fallback uses the local model only
+        scan = collect_detections(input_video, self.detector,
+                                  None if self.fast_cloud else self.cloud, on_scan)
         fps, W, H = scan["fps"], scan["width"], scan["height"]
         total = scan["frames"]
         diag = math.hypot(W, H)
@@ -260,6 +267,8 @@ class VideoProcessor:
         fps, W, H, total = fs["fps"], fs["width"], fs["height"], fs["frames"]
         prog(88, total, total, "Building ball trajectory...")
         track = build_track(fs, input_video, self.cloud)
+        if len(track) < 5:
+            return None          # caller falls back to the local engine
         if len(track) >= 5:
             analysis = analyze_video_track(track, fps, W, H, pitch_length_m=pitch_length_m,
                                            batsman_hand=batsman_hand, timestamps=fs.get("timestamps"))

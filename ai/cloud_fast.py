@@ -84,6 +84,7 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
         if progress and idx % 10 == 0:
             progress(idx, total, "roboflow-cloud (fast)")
     cap.release()
+    cloud.max_conf_seen = 0.0
 
     dets: Dict[int, List[List[float]]] = {}
     fails = 0
@@ -93,8 +94,14 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
             fails += 1
             cloud.last_error = err
             continue
+        if res:
+            cloud.max_conf_seen = max(getattr(cloud, "max_conf_seen", 0.0), max(d[4] for d in res))
         dets[i] = BallDetector._filter([d for d in res if d[4] >= CONF], (H, W))
     pool.shutdown(wait=True)
+    raw_hits = sum(1 for i in futures if i in dets and dets[i])
+    print(f"[FastCloud] {len(futures)} frames sent, {fails} failed, {raw_hits} with a ball detection"
+          f", max confidence {getattr(cloud, 'max_conf_seen', 0.0):.2f}"
+          f"{' | last error: ' + str(cloud.last_error) if fails else ''}")
     if futures and fails / len(futures) > 0.5:
         return {"ok": False, "error": cloud.last_error}
 
