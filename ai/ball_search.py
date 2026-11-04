@@ -13,6 +13,7 @@ Single pass over a video that collects ball detections efficiently.
 Memory stays small: only a ring buffer of the last few frames is kept.
 """
 import math
+import os
 from collections import deque
 from typing import Callable, Dict, List, Optional
 
@@ -68,7 +69,11 @@ def collect_detections(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     diag = math.hypot(width, height)
 
-    stride = 3 if fps >= 45 else (2 if fps >= 25 else 1)
+    # Full-frame search interval. ROI crops follow a moving ball on every frame
+    # and backfill recovers the release, so the expensive tiled search only has
+    # to *find* the ball once in a while (~15 times per second is plenty).
+    search_hz = float(os.getenv("BALL_SEARCH_HZ", "15"))
+    stride = max(1, int(round(fps / search_hz)))
     use_cloud = cloud is not None and getattr(cloud, "active", False)
     cloud_chunk = 24
     cloud_ok_frames = 0
@@ -122,7 +127,7 @@ def collect_detections(
         for frame in chunk:
             # 1) search: denser while nothing is moving, sparser while we follow a ball
             moving = linker.moving_tracks(idx, limit=2)
-            every = max(1, stride - 1) if not moving else stride + 1
+            every = stride if not moving else stride * 2
             if idx in cloud_dets:
                 found = [d for d in cloud_dets[idx] if d[4] >= SEARCH_CONF]
                 found = BallDetector._filter(found, frame.shape)
@@ -212,3 +217,117 @@ def collect_detections(
         "local_inferences": n_infer,
         "cloud_frames": cloud_ok_frames,
     }
+
+
+def refine_track(video_path: str, detector: Optional[BallDetector], track: List[Dict],
+                 fps: float, max_back_s: float = 0.6, max_misses: int = 5) -> List[Dict]:
+    """
+    Second, targeted pass over the selected delivery only:
+      * fills frames missing inside the track (ROI at the interpolated position)
+      * walks back from the first point towards the bowler's hand (release)
+    Costs a few dozen inferences, so the full-frame search can stay sparse.
+    """
+    if detector is None or len(track) < 3:
+        return track
+    first, last = int(track[0]["frame"]), int(track[-1]["frame"])
+    lo = max(0, first - int(round(max_back_s * fps)))
+    need = set(range(lo, last + 1))
+    cap = cv2.VideoCapture(video_path)
+    frames = {}
+    i = 0
+    while i <= last:
+        ok = cap.grab()
+        if not ok:
+            break
+        if i in need:
+            ok, fr = cap.retrieve()
+            if ok:
+                frames[i] = fr
+        i += 1
+    cap.release()
+    if not frames:
+        return track
+
+    H, W = next(iter(frames.values())).shape[:2]
+    small_video = min(W, H) < 600
+    by_f = {int(p["frame"]): dict(p) for p in track}
+
+    def zoom_for(size_px):
+        return 2.0 if size_px * detector.train_long_side / float(max(H, W)) < 9 or small_video else 1.0
+
+    def nearest(dets, guess, gate, min_conf):
+        dets = [d for d in dets if math.hypot(d[0] - guess[0], d[1] - guess[1]) < gate and d[4] >= min_conf]
+        return min(dets, key=lambda d: math.hypot(d[0] - guess[0], d[1] - guess[1])) if dets else None
+
+    def as_pt(f, d):
+        return {"frame": f, "x": float(d[0]), "y": float(d[1]), "size": float(min(d[2], d[3])), "conf": float(d[4])}
+
+    # 1) gaps inside the track
+    fs = sorted(by_f)
+    for a, b in zip(fs, fs[1:]):
+        if b - a < 2 or b - a > 8:
+            continue
+        pa, pb = by_f[a], by_f[b]
+        for f in range(a + 1, b):
+            if f not in frames:
+                continue
+            r = (f - a) / (b - a)
+            guess = (pa["x"] + r * (pb["x"] - pa["x"]), pa["y"] + r * (pb["y"] - pa["y"]))
+            step = math.hypot(pb["x"] - pa["x"], pb["y"] - pa["y"]) / (b - a)
+            d = nearest(detector.detect_roi(frames[f], guess, BACKFILL_CONF, zoom=zoom_for(pa["size"])),
+                        guess, 8 + 0.8 * step, BACKFILL_CONF)
+            if d is not None:
+                by_f[f] = as_pt(f, d)
+
+    # 2) walk back to the release
+    fs = sorted(by_f)
+    cur_f = fs[0]
+    cur = np.array([by_f[cur_f]["x"], by_f[cur_f]["y"]])
+    # velocity from the first two points only: later points may already be past the bounce
+    v = (np.array([by_f[fs[1]]["x"], by_f[fs[1]]["y"]]) - cur) / max(1, fs[1] - cur_f)
+    size = by_f[cur_f]["size"]
+    misses = 0
+    for f in range(cur_f - 1, lo - 1, -1):
+        if f not in frames:
+            break
+        gap = cur_f - f
+        guess = cur - v * gap
+        speed = float(np.linalg.norm(v))
+        gate = 8.0 + 0.7 * speed * gap
+        d = None
+        # try a strong zoom first (tiny far ball), then training scale (blurred, bigger ball)
+        for z in (max(1.5, zoom_for(size)), 1.0):
+            d = nearest(detector.detect_roi(frames[f], guess, BACKFILL_CONF, zoom=z), guess, gate, BACKFILL_CONF)
+            if d is not None:
+                break
+        if d is not None:
+            new = np.array(d[:2], dtype=float)
+            v = 0.5 * v + 0.5 * (cur - new) / gap
+            cur_f, cur, size = f, new, float(min(d[2], d[3]))
+            by_f[f] = as_pt(f, d)
+            misses = 0
+        else:
+            misses += 1
+            if misses >= max_misses:
+                break
+    return [by_f[f] for f in sorted(by_f)]
+
+
+def dense_search(video_path: str, detector: Optional[BallDetector], f0: int, f1: int,
+                 conf: float = 0.10) -> Dict[int, List[List[float]]]:
+    """Full tiled search on every frame in [f0, f1) - used only to repair a bad track."""
+    out: Dict[int, List[List[float]]] = {}
+    if detector is None or f1 <= f0:
+        return out
+    cap = cv2.VideoCapture(video_path)
+    i = 0
+    while i < f1:
+        if not cap.grab():
+            break
+        if i >= f0:
+            ok, fr = cap.retrieve()
+            if ok:
+                out[i] = detector.detect_tiled(fr, conf)
+        i += 1
+    cap.release()
+    return out

@@ -29,6 +29,14 @@ import numpy as np
 TILE = 640
 
 
+def _default_threads() -> int:
+    """Use the CPU cores (capped at 4 - more gives little for one 640 tile)."""
+    env = os.getenv("ORT_THREADS")
+    if env:
+        return max(1, int(env))
+    return max(1, min(4, os.cpu_count() or 1))
+
+
 def _nms(dets: List[List[float]], iou: float = 0.4, conf: float = 0.0) -> List[List[float]]:
     if not dets:
         return []
@@ -68,10 +76,25 @@ class BallDetector:
                 import onnxruntime as ort
 
                 so = ort.SessionOptions()
-                so.intra_op_num_threads = int(os.getenv("ORT_THREADS", "1"))
+                so.intra_op_num_threads = _default_threads()
                 so.inter_op_num_threads = 1
-                self.session = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
+                so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                providers = ["CPUExecutionProvider"]
+                avail = ort.get_available_providers()
+                # Apple Silicon / Mac: CoreML runs the model on the GPU / Neural Engine
+                if "CoreMLExecutionProvider" in avail and os.getenv("USE_COREML", "false").lower() == "true":
+                    providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+                if "CUDAExecutionProvider" in avail:
+                    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                try:
+                    self.session = ort.InferenceSession(onnx_path, so, providers=providers)
+                    self.session.run(None, {self.session.get_inputs()[0].name:
+                                            np.zeros((1, 3, TILE, TILE), np.float32)})
+                except Exception as e:
+                    print(f"[BallDetector] {providers[0]} failed ({e}); using CPU")
+                    self.session = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
                 self.input_name = self.session.get_inputs()[0].name
+                self.providers = self.session.get_providers()
                 self.backend = "onnxruntime"
             except Exception as e:  # onnxruntime missing or failed
                 print(f"[BallDetector] onnxruntime unavailable ({e}); trying OpenCV DNN")
@@ -92,7 +115,8 @@ class BallDetector:
 
         if self.backend is None:
             raise RuntimeError("No ball detection model found in weights/ (need tennis_ball_detector.onnx or .pt)")
-        print(f"[BallDetector] backend={self.backend} train_long_side={self.train_long_side}")
+        print(f"[BallDetector] backend={self.backend} providers={getattr(self, 'providers', '-')} "
+              f"threads={_default_threads()} train_long_side={self.train_long_side}")
 
     @staticmethod
     def _read_train_imgsz(weights_dir: str) -> Optional[int]:

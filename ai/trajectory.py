@@ -17,13 +17,14 @@ import numpy as np
 
 
 class Tracklet:
-    __slots__ = ("frames", "pts", "sizes", "confs")
+    __slots__ = ("frames", "pts", "sizes", "confs", "_bounced")
 
     def __init__(self, frame: int, det: Sequence[float]):
         self.frames = [frame]
         self.pts = [(float(det[0]), float(det[1]))]
         self.sizes = [float(min(det[2], det[3]))]
         self.confs = [float(det[4])]
+        self._bounced = False
 
     # ---- geometry helpers -------------------------------------------------
     @property
@@ -200,11 +201,21 @@ def chain_tracklets(tracklets: List[Tracklet], frame_diag: float, max_gap: int =
                     vu = u.velocity() if len(u.pts) <= 4 else (np.array(u.pts[min(3, len(u.pts) - 1)]) - np.array(u.pts[0])) / max(1, u.frames[min(3, len(u.pts) - 1)] - u.frames[0])
                     vc = chain.velocity()
                     if np.linalg.norm(vu) > 2 and np.linalg.norm(vc) > 2 and float(vu @ vc) < 0:
-                        continue
+                        # allowed only if it looks like the pitch bounce: the ball was going down
+                        # the screen and now goes up, while the sideways motion carries on
+                        bounce_like = (vc[1] > 0 and vu[1] < 0 and
+                                       abs(vu[0] - vc[0]) <= 0.6 * max(np.linalg.norm(vu), np.linalg.norm(vc)) + 2.0
+                                       and 0.3 < np.linalg.norm(vu) / np.linalg.norm(vc) < 2.5
+                                       and gap <= 3 and not getattr(chain, "_bounced", False))
+                        if not bounce_like:
+                            continue
                 if dist <= gate and (best is None or dist < best[0]):
                     best = (dist, j, u)
             if best is not None:
+                v_before = chain.velocity()
                 chain.extend(best[2])
+                if v_before[1] > 0 and best[2].velocity()[1] < 0:
+                    chain._bounced = True
                 used.add(best[1])
                 grown = True
         chains.append(chain)
@@ -266,13 +277,14 @@ def select_delivery(tracklets: List[Tracklet], frame_diag: float) -> Optional[Tr
     return best
 
 
-def trim_delivery(track: List[Dict[str, float]]) -> List[Dict[str, float]]:
+def trim_delivery(track: List[Dict[str, float]], frame_diag: float = 0.0, fps: float = 60.0) -> List[Dict[str, float]]:
     """
     Cut the track to the delivery flight: drop pre-release hand movement and
     everything after the ball hits the bat / reverses direction.
     """
     if len(track) < 5:
         return track
+    hand_px_per_frame = 0.003 * frame_diag * (30.0 / max(1.0, fps)) if frame_diag else 0.0
     p = np.array([[d["x"], d["y"]] for d in track])
     f = np.array([d["frame"] for d in track], dtype=float)
 
@@ -283,8 +295,12 @@ def trim_delivery(track: List[Dict[str, float]]) -> List[Dict[str, float]]:
     # and the speed stay continuous. Anything else that reverses is a hit.
     end = n
     bounce_seen = False
+    bounce_i = -10
     for i in range(2, n - 1):
-        v_prev = (p[i] - p[i - 2]) / max(1.0, f[i] - f[i - 2])
+        j = max(i - 2, bounce_i)           # never measure "before" across the bounce
+        if j >= i:
+            continue
+        v_prev = (p[i] - p[j]) / max(1.0, f[i] - f[j])
         v_next = (p[i + 1] - p[i]) / max(1.0, f[i + 1] - f[i])
         sp, sn = np.linalg.norm(v_prev), np.linalg.norm(v_next)
         if sp < 1.0 or sn < 1.0:
@@ -296,12 +312,13 @@ def trim_delivery(track: List[Dict[str, float]]) -> List[Dict[str, float]]:
             x_continuous = abs(v_next[0] - v_prev[0]) <= 0.6 * max(sp, sn) + 2.0
             if not bounce_seen and vertical_flip and x_continuous and 0.35 < ratio < 2.5:
                 bounce_seen = True
+                bounce_i = i
                 continue
             if cosang < -0.17 or ratio > 2.0:
                 end = i + 1
                 break
         # sudden speed jump = bat contact
-        if ratio > 2.5 and sn > 4.0:
+        if ratio > 2.2 and sn > 4.0:
             end = i + 1
             break
     out = track[:end]
@@ -315,11 +332,15 @@ def trim_delivery(track: List[Dict[str, float]]) -> List[Dict[str, float]]:
         if step >= 1.5:
             start = i
             break
-    # still in the bowler's hand: much slower than the step that follows
+    # still in the bowler's hand: much slower than the flight that follows, or
+    # nearly stationary (threshold scales with image size and frame rate)
+    def step(i):
+        return np.linalg.norm(p[i + 1] - p[i]) / max(1.0, f[i + 1] - f[i])
+
     while start < len(p) - 5:
-        s1 = np.linalg.norm(p[start + 1] - p[start]) / max(1.0, f[start + 1] - f[start])
-        s2 = np.linalg.norm(p[start + 2] - p[start + 1]) / max(1.0, f[start + 2] - f[start + 1])
-        if s2 > 1.0 and s1 < 0.4 * s2:
+        s1 = step(start)
+        nxt = float(np.median([step(start + k) for k in (1, 2, 3)]))
+        if nxt > 1.0 and (s1 < 0.4 * nxt or s1 < hand_px_per_frame):
             start += 1
         else:
             break

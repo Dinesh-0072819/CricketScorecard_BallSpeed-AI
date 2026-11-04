@@ -19,11 +19,41 @@ import cv2
 import numpy as np
 
 from ai.ball_detector import BallDetector
-from ai.ball_search import collect_detections
+from ai.ball_search import collect_detections, dense_search, refine_track
 from ai.delivery_analysis import DEFAULT_PITCH_LENGTH_M, analyze_video_track
 from ai.roboflow_client import RoboflowClient
-from ai.trajectory import link_detections, select_delivery, trim_delivery
+from ai.cloud_fast import build_track, cloud_fast_scan
+from ai.trajectory import chain_tracklets as _chains, link_detections, select_delivery, trim_delivery
 from ai.utils import CalibrationManager
+
+CLOUD_FAST = os.getenv("CLOUD_FAST", "true").lower() == "true"   # Roboflow-only + browser overlay
+SPEED_MIN_KMH = float(os.getenv("SPEED_MIN_KMH", "20"))
+SPEED_MAX_KMH = float(os.getenv("SPEED_MAX_KMH", "165"))
+
+
+def _dist_to_range(v):
+    if v < SPEED_MIN_KMH:
+        return SPEED_MIN_KMH - v
+    if v > SPEED_MAX_KMH:
+        return v - SPEED_MAX_KMH
+    return 0.0
+
+
+def _trim_slow_ends(track):
+    """Drop leading/trailing points that move much slower than the flight (in hand / rolling)."""
+    if len(track) < 8:
+        return track
+    p = np.array([[q["x"], q["y"]] for q in track])
+    f = np.array([q["frame"] for q in track], dtype=float)
+    step = np.linalg.norm(np.diff(p, axis=0), axis=1) / np.maximum(1.0, np.diff(f))
+    ref = float(np.percentile(step, 75))   # flight speed (hand/rolling phases are slower)
+    a, b = 0, len(track) - 1
+    while a < b - 5 and step[a] < 0.35 * ref:
+        a += 1
+    while b > a + 5 and step[b - 1] < 0.35 * ref:
+        b -= 1
+    return track[a:b + 1]
+
 
 TYPE_COLORS = {  # BGR, matches frontend DeliveryTypeBadge
     "OFF_SPIN": (0, 171, 255),
@@ -37,20 +67,31 @@ TYPE_COLORS = {  # BGR, matches frontend DeliveryTypeBadge
 class VideoProcessor:
     def __init__(self):
         print("=" * 50)
-        print("Loading Tennis Ball AI Model...")
-        try:
-            self.detector = BallDetector("weights")
-        except Exception as e:
-            print(f"Local model unavailable: {e}")
-            self.detector = None
         self.cloud = RoboflowClient()
         self.use_roboflow = self.cloud.active
-        self.is_custom_model = self.detector is not None
+        self.fast_cloud = self.cloud.active and CLOUD_FAST
+        self._detector = None
+        self._detector_loaded = False
+        if not self.fast_cloud:
+            _ = self.detector          # local engine is the main engine: load it now
+        self.is_custom_model = True
         self.calib_mgr = CalibrationManager(os.getenv("CALIBRATION_PATH", "config_calibration.json"))
         self.H = None
-        print(f"Local engine : {self.detector.backend if self.detector else 'NONE'}")
-        print(f"Roboflow     : {self.cloud.status}")
+        print(f"Roboflow     : {self.cloud.status}{' (fast cloud mode)' if self.fast_cloud else ''}")
         print("=" * 50)
+
+    @property
+    def detector(self):
+        """Local YOLO engine, loaded on first use (in fast cloud mode it is only a fallback)."""
+        if not self._detector_loaded:
+            self._detector_loaded = True
+            try:
+                self._detector = BallDetector("weights")
+                print(f"Local engine : {self._detector.backend}")
+            except Exception as e:
+                print(f"Local model unavailable: {e}")
+                self._detector = None
+        return self._detector
 
     # ------------------------------------------------------------------ status / compat
     @property
@@ -96,6 +137,18 @@ class VideoProcessor:
                 pct = min(85, int(i / max(1, total) * 85))
                 prog(pct, i, total, f"Tracking ball ({engine}): frame {i} of {total}")
 
+        # ---------------- fast cloud mode (Roboflow does all detection) ----------------
+        if self.fast_cloud and self.cloud.active:
+            prog(2, 0, 0, "Sending frames to Roboflow Cloud...")
+            try:
+                fs = cloud_fast_scan(input_video, self.cloud, on_scan)
+            except Exception as e:
+                fs = {"ok": False, "error": str(e)}
+            if fs.get("ok"):
+                return self._process_fast(fs, input_video, max_speed, batsman_hand, pitch_length_m, prog)
+            print(f"[FastCloud] Roboflow unavailable ({fs.get('error')}); using the local engine")
+            prog(3, 0, 0, "Roboflow unavailable - using the local AI engine...")
+
         if self.detector is None and not self.cloud.active:
             return self._empty_result("ERROR: no ball detection model available", max_speed)
 
@@ -109,27 +162,65 @@ class VideoProcessor:
         # ---------------- 2. delivery track ----------------
         tracklets = link_detections(scan["detections"], diag)
         best = select_delivery(tracklets, diag)
-        track = trim_delivery(best.as_dicts()) if best is not None else []
+        track = trim_delivery(best.as_dicts(), diag, fps) if best is not None else []
+        if len(track) >= 3 and self.detector is not None:
+            prog(86, total, total, "Refining release & bounce frames...")
+            track = trim_delivery(refine_track(input_video, self.detector, track, fps), diag, fps)
 
         # ---------------- 3. analysis ----------------
-        if len(track) >= 5:
-            analysis = analyze_video_track(
-                track, fps, W, H,
-                pitch_length_m=pitch_length_m,
-                batsman_hand=batsman_hand,
-                timestamps=scan.get("timestamps"),
-            )
-        else:
-            analysis = analyze_video_track([], fps, W, H)
-            analysis["status"] = "ball_not_found"
+        def analyse(trk):
+            if len(trk) >= 5:
+                return analyze_video_track(trk, fps, W, H, pitch_length_m=pitch_length_m,
+                                           batsman_hand=batsman_hand, timestamps=scan.get("timestamps"))
+            a = analyze_video_track([], fps, W, H)
+            a["status"] = "ball_not_found"
+            return a
 
+        analysis = analyse(track)
         speed = float(analysis.get("speed_kmh", 0.0))
-        # sanity: outside the physically possible range = tracking error
-        if speed and not (15.0 <= speed <= 170.0):
-            print(f"Speed {speed:.1f} km/h outside plausible range -> rejected")
-            analysis["status"] = "implausible_speed"
-            analysis["speed_kmh_raw"] = speed
-            speed = 0.0
+
+        # ---- speed outside the realistic range: try to repair the track ----
+        if len(track) >= 5 and not (SPEED_MIN_KMH <= speed <= SPEED_MAX_KMH):
+            print(f"Speed {speed:.1f} km/h outside {SPEED_MIN_KMH}-{SPEED_MAX_KMH}: repairing track")
+            if speed > SPEED_MAX_KMH and self.detector is not None:
+                # too fast -> release was missed: search further back with more patience
+                track2 = trim_delivery(refine_track(input_video, self.detector, track, fps,
+                                                    max_back_s=1.5, max_misses=10), diag, fps)
+            else:
+                # too slow -> ball still in the hand at the start / rolling at the end
+                track2 = _trim_slow_ends(track)
+            a2 = analyse(track2)
+            s2 = float(a2.get("speed_kmh", 0.0))
+            if speed > SPEED_MAX_KMH and s2 > SPEED_MAX_KMH and self.detector is not None:
+                # still too fast: search every frame before the track at full resolution,
+                # rebuild the tracks and pick the delivery that ends where ours ends
+                prog(86, total, total, "Searching for the release frames...")
+                f0 = max(0, int(track[0]["frame"]) - int(1.5 * fps))
+                extra = dense_search(input_video, self.detector, f0, int(track[0]["frame"]), conf=0.08)
+                dets = dict(scan["detections"])
+                for k, v in extra.items():
+                    dets[k] = (dets.get(k) or []) + v
+                cands = [c for c in _chains(link_detections(dets, diag), diag)
+                         if abs(c.frames[-1] - track[-1]["frame"]) <= 3 and c.frames[0] < track[0]["frame"]]
+                if cands:
+                    c = max(cands, key=lambda c: len(c.pts))
+                    track3 = trim_delivery(refine_track(input_video, self.detector,
+                                                        trim_delivery(c.as_dicts(), diag, fps), fps), diag, fps)
+                    a3 = analyse(track3)
+                    s3 = float(a3.get("speed_kmh", 0.0))
+                    if len(track3) >= 5 and abs(_dist_to_range(s3)) < abs(_dist_to_range(s2)):
+                        track2, a2, s2 = track3, a3, s3
+            if len(track2) >= 5 and abs(_dist_to_range(s2)) < abs(_dist_to_range(speed)):
+                track, analysis, speed = track2, a2, s2
+
+        if len(track) >= 5 and not (SPEED_MIN_KMH <= speed <= SPEED_MAX_KMH):
+            analysis["speed_note"] = ("Release or arrival of the ball was not clearly visible, so this speed is an "
+                                      "estimate. Record at 60 fps with the bowler's hand in view.")
+            analysis["confidence"] = min(analysis.get("confidence", 0.5), 0.4)
+            if not (5.0 <= speed <= 250.0):   # physically impossible: tracking failed
+                analysis["status"] = "implausible_speed"
+                analysis["speed_kmh_raw"] = speed
+                speed = 0.0
         status = "NO-BALL" if speed > float(max_speed) else "SAFE"
         if speed > float(max_speed):
             self._log_alarm(speed, max_speed)
@@ -162,6 +253,59 @@ class VideoProcessor:
             "engine": scan["engine"],
             "analysis": analysis,
             "trajectory": [[int(p["frame"]), round(p["x"], 1), round(p["y"], 1)] for p in track],
+        }
+
+    # ------------------------------------------------------------------ fast cloud
+    def _process_fast(self, fs, input_video, max_speed, batsman_hand, pitch_length_m, prog):
+        fps, W, H, total = fs["fps"], fs["width"], fs["height"], fs["frames"]
+        prog(88, total, total, "Building ball trajectory...")
+        track = build_track(fs, input_video, self.cloud)
+        if len(track) >= 5:
+            analysis = analyze_video_track(track, fps, W, H, pitch_length_m=pitch_length_m,
+                                           batsman_hand=batsman_hand, timestamps=fs.get("timestamps"))
+        else:
+            analysis = analyze_video_track([], fps, W, H)
+            analysis["status"] = "ball_not_found"
+        speed = float(analysis.get("speed_kmh", 0.0))
+        if len(track) >= 5 and not (SPEED_MIN_KMH <= speed <= SPEED_MAX_KMH):
+            analysis["speed_note"] = ("Release or arrival of the ball was not clearly visible, so this speed is an "
+                                      "estimate. Record at 60 fps with the bowler's hand in view.")
+            analysis["confidence"] = min(analysis.get("confidence", 0.5), 0.4)
+            if not (5.0 <= speed <= 250.0):
+                analysis["status"] = "implausible_speed"
+                analysis["speed_kmh_raw"] = speed
+                speed = 0.0
+        status = "NO-BALL" if speed > float(max_speed) else "SAFE"
+        if speed > float(max_speed):
+            self._log_alarm(speed, max_speed)
+
+        ts = fs.get("timestamps") or []
+        def t_of(f):
+            return round(float(ts[f]), 4) if f < len(ts) else round(f / fps, 4)
+        overlay = {
+            "width": W, "height": H, "fps": fps,
+            "track": [{"f": int(p["frame"]), "t": t_of(int(p["frame"])), "x": round(p["x"], 1),
+                       "y": round(p["y"], 1), "r": round(max(6.0, p.get("size", 10) * 0.9), 1)} for p in track],
+            "bounce": ({"t": t_of(int(analysis["bounce_frame"])), "x": analysis["bounce_point_px"][0],
+                        "y": analysis["bounce_point_px"][1]} if analysis.get("bounce_frame") is not None
+                       and analysis.get("bounce_point_px") else None),
+            "speed": round(speed, 1), "status": status, "max_speed": max_speed,
+            "delivery_type": analysis.get("delivery_type", "STRAIGHT"),
+            "turn_deg": analysis.get("turn_angle_deg", 0.0), "swing_cm": analysis.get("swing_cm", 0.0),
+        }
+        print(f"[FastCloud] {fs['cloud_requests']} Roboflow requests, scan {fs['scan_seconds']:.1f}s, "
+              f"track {len(track)} pts, speed {speed:.1f} km/h, {analysis.get('delivery_type')}")
+        prog(100, total, total, "Delivery analysis complete!")
+        return {
+            "speed": round(speed, 1), "status": status,
+            "deviation_angle": analysis.get("deviation_angle_deg", 0.0),
+            "turn_angle": analysis.get("turn_angle_deg", 0.0),
+            "turn_direction": analysis.get("turn_direction", "Straight"),
+            "swing_cm": analysis.get("swing_cm", 0.0),
+            "delivery_type": analysis.get("delivery_type", "STRAIGHT"),
+            "engine": fs["engine"], "analysis": analysis,
+            "trajectory": [[int(p["frame"]), round(p["x"], 1), round(p["y"], 1)] for p in track],
+            "overlay_mode": "client", "overlay": overlay,
         }
 
     # ------------------------------------------------------------------ helpers

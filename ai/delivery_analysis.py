@@ -39,9 +39,15 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 # Thresholds (also imported by tests via config.py)
-TURN_MIN_DEG = float(os.getenv("TURN_MIN_DEG", "2.0"))      # off-the-pitch turn to call it spin
-TURN_MIN_LATERAL_M = 0.04                                  # and at least 4 cm sideways after bounce
-SWING_MIN_M = float(os.getenv("SWING_MIN_M", "0.08"))      # in-air lateral curve to call it swing
+# Rule: ANY deviation after pitching = spin (towards batsman OFF_SPIN, away LEG_SPIN);
+#       otherwise ANY deviation before pitching = swing (towards INSWING, away OUTSWING).
+# The small floors below only ignore camera / tracking jitter on a straight ball.
+TURN_MIN_DEG = float(os.getenv("TURN_MIN_DEG", "0.5"))      # STRAIGHT only below 0.5 deg turn after pitching
+TURN_MIN_DEG_SLOW = float(os.getenv("TURN_MIN_DEG_SLOW", str(TURN_MIN_DEG)))
+SPIN_SPEED_KMH = float(os.getenv("SPIN_SPEED_KMH", "95"))  # below this a ball is treated as slow / spin
+TURN_MIN_LATERAL_M = 0.0                                   # and at least 3 cm sideways after bounce
+SWING_MIN_M = float(os.getenv("SWING_MIN_M", "0.01"))      # STRAIGHT only below 1 cm swing before pitching
+SIGNIFICANCE = float(os.getenv("DEVIATION_SIGNIFICANCE", "2.0"))   # deviation must exceed 2x its error bar      # in-air lateral curve to call it swing
 CREASE_OFFSET_M = 1.22
 DEFAULT_PITCH_LENGTH_M = float(os.getenv("PITCH_LENGTH_M", "20.12"))
 BALL_DIAMETER_M = float(os.getenv("BALL_DIAMETER_M", "0.067"))   # tennis ball (leather = 0.072)
@@ -78,6 +84,25 @@ def _robust_polyfit(x: np.ndarray, y: np.ndarray, deg: int, iters: int = 3) -> n
         w = 1.0 / np.maximum(1.0, np.abs(r) / (2.5 * s))
         coef = np.polyfit(x, y, deg, w=w)
     return coef
+
+
+def _unscaled_cov(x: np.ndarray, deg: int) -> np.ndarray:
+    """(X^T X)^-1 for a polynomial fit: multiply by sigma^2 to get the coefficient covariance."""
+    X = np.vander(np.asarray(x, dtype=float), deg + 1)
+    try:
+        return np.linalg.inv(X.T @ X)
+    except np.linalg.LinAlgError:
+        return np.full((deg + 1, deg + 1), 1e6)
+
+
+def _robust_sigma(res: np.ndarray, dof: int) -> float:
+    """Scatter of the points around a fit (robust), with a small floor for perfect tracks."""
+    res = np.asarray(res, dtype=float)
+    if len(res) == 0:
+        return 1.0
+    mad = 1.4826 * float(np.median(np.abs(res - np.median(res))))
+    rms = float(np.sqrt(np.sum(res ** 2) / max(1, dof)))
+    return max(0.002, 0.5 * (mad + rms))   # >= 2 mm
 
 
 def find_bounce(t: np.ndarray, py: np.ndarray) -> Optional[int]:
@@ -124,64 +149,107 @@ def _classify(
     pre_end = bounce if bounce is not None else n - 1
     pre_L, pre_D = L[:pre_end + 1], D[:pre_end + 1]
 
+    # Every deviation is tested against its own error bar (from how much the tracked
+    # points scatter around the fitted path), so even a small turn counts when the
+    # track is clean, while camera/tracking jitter on a straight ball does not.
+
     # ---- swing: lateral curvature of the in-air path before the bounce ----
-    swing_m, swing_dir = 0.0, 0.0
+    swing_m, swing_dir, swing_sigma_m = 0.0, 0.0, float("inf")
+    pre_res = None
     if len(pre_L) >= 4 and np.ptp(pre_D) > 0.5:
         dn = (pre_D - pre_D[0]) / np.ptp(pre_D)                       # 0..1 along the flight
-        c2 = _robust_polyfit(dn, pre_L, 2)[0] if len(pre_L) >= 5 else np.polyfit(dn, pre_L, 2)[0]
+        c = _robust_polyfit(dn, pre_L, 2) if len(pre_L) >= 5 else np.polyfit(dn, pre_L, 2)
+        c2 = c[0]
         swing_m = abs(c2) / 4.0                                       # max bulge from the chord
         swing_dir = math.copysign(1.0, c2) if swing_m > 0 else 0.0    # direction of late movement
+        pre_res = pre_L - np.polyval(c, dn)
+        if len(pre_L) >= 5:
+            sig = _robust_sigma(pre_res, len(pre_L) - 3)
+            cov = _unscaled_cov(dn, 2)
+            swing_sigma_m = math.sqrt(max(cov[0, 0], 0.0)) * sig / 4.0
 
     # ---- turn: change of direction at the bounce ----
-    turn_deg, turn_m = 0.0, 0.0
+    turn_deg, turn_m, turn_sigma_deg = 0.0, 0.0, float("inf")
     turn_reliable = False
     if bounce is not None and bounce >= 2 and n - bounce >= 3:
         preD, preL = D[:bounce + 1], L[:bounce + 1]
         if len(preD) >= 6 and np.ptp(preD) > 1.0:
             q = _robust_polyfit(preD, preL, 2)                                  # allows for swing
             a = float(2 * q[0] * preD[-1] + q[1])                               # dL/dD at the bounce
+            g = np.array([2 * preD[-1], 1.0, 0.0])
+            var_a_unit = float(g @ _unscaled_cov(preD, 2) @ g)
+            res_a = preL - np.polyval(q, preD)
+            dof_a = len(preD) - 3
         else:
-            a = float(np.polyfit(preD, preL, 1)[0])
+            q = np.polyfit(preD, preL, 1)
+            a = float(q[0])
+            var_a_unit = float(_unscaled_cov(preD, 1)[0, 0]) if len(preD) >= 3 else 1e6
+            res_a = preL - np.polyval(q, preD)
+            dof_a = len(preD) - 2
         post_D, post_L = D[bounce:], L[bounce:]
         if np.ptp(post_D) > 0.2:
-            b = np.polyfit(post_D, post_L, 1)[0]                               # dL/dD after
+            qb = np.polyfit(post_D, post_L, 1)
+            b = float(qb[0])                                                    # dL/dD after
             turn_deg = math.degrees(math.atan(b) - math.atan(a))
             # sideways distance from where a straight ball would be at the end of the track
             turn_m = (b - a) * float(post_D[-1] - post_D[0])
             # need enough of the path after the bounce to measure a change of direction
-            turn_reliable = len(post_D) >= 6 and np.ptp(post_D) >= 1.5
+            turn_reliable = len(post_D) >= 4 and np.ptp(post_D) >= 1.0
+            # error bar of the turn angle: pooled scatter of the points around both fits
+            res_b = post_L - np.polyval(qb, post_D)
+            sig = _robust_sigma(np.concatenate([res_a, res_b]), max(1, dof_a + len(post_D) - 2))
+            var_b_unit = float(_unscaled_cov(post_D, 1)[0, 0]) if len(post_D) >= 3 else 1e6
+            turn_sigma_deg = math.degrees(sig * math.sqrt(max(0.0, var_a_unit) + max(0.0, var_b_unit)))
 
     toward_leg_turn = (turn_deg * mirror) > 0
     toward_leg_swing = (swing_dir * mirror) > 0
 
+    # slow balls (spinners) need a smaller turn to count than pace balls (cutters)
+    turn_min = TURN_MIN_DEG_SLOW if (speed_kmh is None or speed_kmh < SPIN_SPEED_KMH) else TURN_MIN_DEG
     spin_type = "NONE"
-    if turn_reliable and abs(turn_deg) >= TURN_MIN_DEG and abs(turn_m) >= TURN_MIN_LATERAL_M:
+    # User rule: ANY deviation after pitching (>= 1.0 deg) is spin. The error bar
+    # does not block it; it only lowers the reported confidence.
+    if turn_reliable and abs(turn_deg) >= turn_min and abs(turn_m) >= TURN_MIN_LATERAL_M:
         spin_type = "OFF_SPIN" if toward_leg_turn else "LEG_SPIN"
     swing_type = "NONE"
     if swing_m >= SWING_MIN_M:
         swing_type = "INSWING" if toward_leg_swing else "OUTSWING"
 
-    # both present: the movement that exceeds its threshold more strongly wins
-    spin_strength = abs(turn_deg) / TURN_MIN_DEG if spin_type != "NONE" else 0.0
-    swing_strength = swing_m / SWING_MIN_M if swing_type != "NONE" else 0.0
-    if spin_strength == 0.0 and swing_strength == 0.0:
-        delivery_type = "STRAIGHT"
-    elif spin_strength >= swing_strength:
+    # Rule: deviation after pitching decides first (spin), then deviation before
+    # pitching (swing); STRAIGHT only when both are below their minimums.
+    if spin_type != "NONE":
         delivery_type = spin_type
-    else:
+    elif swing_type != "NONE":
         delivery_type = swing_type
+    else:
+        delivery_type = "STRAIGHT"
 
     who = "RHB" if hand == "RIGHT" else "LHB"
+    spin_sure = not (math.isfinite(turn_sigma_deg) and abs(turn_deg) < SIGNIFICANCE * turn_sigma_deg)
+    swing_sure = not (math.isfinite(swing_sigma_m) and swing_m < SIGNIFICANCE * swing_sigma_m)
+    spin_note = "" if spin_sure else f" \u2013 small turn, \u00b1{turn_sigma_deg:.1f}\u00b0 measurement error"
+    swing_note = "" if swing_sure else f" \u2013 small swing, \u00b1{swing_sigma_m * 100:.0f} cm measurement error"
     if delivery_type == "OFF_SPIN":
-        turn_direction = f"Off Break (turns into the {who})"
+        turn_direction = f"Off Break: turned {abs(turn_deg):.1f}\u00b0 into the {who} after pitching{spin_note}"
     elif delivery_type == "LEG_SPIN":
-        turn_direction = f"Leg Break (turns away from the {who})"
+        turn_direction = f"Leg Break: turned {abs(turn_deg):.1f}\u00b0 away from the {who} after pitching{spin_note}"
     elif delivery_type == "INSWING":
-        turn_direction = f"Inswing (curves into the {who})"
+        turn_direction = f"Inswing: curved {swing_m * 100:.0f} cm into the {who} before pitching{swing_note}"
     elif delivery_type == "OUTSWING":
-        turn_direction = f"Outswing (curves away from the {who})"
+        turn_direction = f"Outswing: curved {swing_m * 100:.0f} cm away from the {who} before pitching{swing_note}"
     else:
-        turn_direction = "Straight Line"
+        # still tell the user what was measured
+        if bounce is not None and not turn_reliable:
+            turn_direction = "Straight (bat hit too soon after the bounce to measure turn)"
+        elif abs(turn_deg) >= 0.5:
+            side = "into" if toward_leg_turn else "away from"
+            if math.isfinite(turn_sigma_deg) and abs(turn_deg) < SIGNIFICANCE * turn_sigma_deg:
+                turn_direction = (f"Straight ({abs(turn_deg):.1f}\u00b0 {side} the {who} is within the "
+                                  f"\u00b1{turn_sigma_deg:.1f}\u00b0 measurement error)")
+            else:
+                turn_direction = f"Straight (slight {abs(turn_deg):.1f}\u00b0 {side} the {who})"
+        else:
+            turn_direction = "Straight Line"
 
     style = "UNKNOWN"
     if speed_kmh:
@@ -201,6 +269,9 @@ def _classify(
         "bowler_style": style,
         "bounce_index": int(bounce) if bounce is not None else None,
         "turn_measurable": bool(turn_reliable),
+        "movement_confidence": "high" if (spin_sure if delivery_type in ("OFF_SPIN", "LEG_SPIN") else swing_sure) else "low",
+        "turn_error_deg": round(float(turn_sigma_deg), 2) if math.isfinite(turn_sigma_deg) else None,
+        "swing_error_cm": round(float(swing_sigma_m) * 100, 1) if math.isfinite(swing_sigma_m) else None,
         "batsman_hand": hand,
     }
 

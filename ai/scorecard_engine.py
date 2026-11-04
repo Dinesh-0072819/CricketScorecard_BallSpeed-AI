@@ -31,22 +31,35 @@ class MatchEngine:
         self.over_deliveries = [] # list of icons/strings in current over
         self.runs_this_over = 0
         self.history = []   # stack for undo operations
+        self.innings_break = False      # True after the 1st innings ends, until the 2nd is set up
+        self.first_innings = None       # {"team", "runs", "wickets", "overs"}
         
         if match_id:
             self.load_match(match_id)
 
     def start_new_match(self, team1, team2, total_overs, toss_winner, toss_decision, batting_team_name=""):
+        self.__init__()                 # forget everything from the previous match
         self.team1 = team1
         self.team2 = team2
-        self.total_overs = int(total_overs)
+        self.total_overs = max(1, int(total_overs))
         self.toss_winner = toss_winner
         self.toss_decision = toss_decision
         self.match_id = create_match(team1, team2, self.total_overs, toss_winner, toss_decision)
         return self.match_id
 
     def setup_innings(self, striker, non_striker, bowler, target=0, current_innings=1):
+        if current_innings != self.current_innings or current_innings == 2:
+            self.batting = {}
+            self.bowling = {}
         self.current_innings = current_innings
+        if current_innings == 2 and not target and self.first_innings:
+            target = self.first_innings["runs"] + 1
         self.target = target
+        self.innings_break = False
+        self.status = "LIVE"
+        self.history = []
+        if self.match_id:
+            update_match_status(self.match_id, current_innings=current_innings, target=target)
         self.striker = striker
         self.non_striker = non_striker
         self.bowler = bowler
@@ -88,6 +101,8 @@ class MatchEngine:
         """
         if self.status == "COMPLETED":
             return {"error": "Match already completed"}
+        if self.innings_break:
+            return {"error": "Innings over - start the 2nd innings first", **self.get_state()}
 
         # Snapshot for undo
         snapshot = self._take_snapshot()
@@ -232,6 +247,8 @@ class MatchEngine:
             self.swap_batsmen() # End of over strike rotation
 
         self._check_match_completion()
+        # no "next bowler" prompt when the innings or match just ended
+        over_completed = over_completed and not self.innings_break and self.status != "COMPLETED"
         return self.get_state(over_completed=over_completed)
 
     def undo(self):
@@ -259,27 +276,64 @@ class MatchEngine:
         if r == 6: return "6"
         return str(r)
 
+    def batting_first_team(self):
+        if self.toss_decision == "BAT":
+            return self.toss_winner or self.team1
+        return self.team2 if self.toss_winner == self.team1 else self.team1
+
+    def batting_team(self):
+        first = self.batting_first_team()
+        if self.current_innings == 1:
+            return first
+        return self.team2 if first == self.team1 else self.team1
+
+    def bowling_team(self):
+        bat = self.batting_team()
+        return self.team2 if bat == self.team1 else self.team1
+
+    def _close_first_innings(self):
+        self.first_innings = {
+            "team": self.batting_team(),
+            "runs": self.runs,
+            "wickets": self.wickets,
+            "overs": f"{self.balls // 6}.{self.balls % 6}",
+        }
+        self.target = self.runs + 1
+        self.innings_break = True
+        update_match_status(self.match_id, current_innings=2, target=self.target)
+
+    def _finish_match(self):
+        chasing = self.batting_team()
+        defending = self.bowling_team()
+        if self.runs >= self.target:
+            self.winner = f"{chasing} won by {10 - self.wickets} wickets"
+        else:
+            margin = (self.target - 1) - self.runs
+            self.winner = "Match Tied" if margin == 0 else f"{defending} won by {margin} runs"
+        self.status = "COMPLETED"
+        update_match_status(self.match_id, status="COMPLETED", winner=self.winner)
+
+    def end_innings(self):
+        """Manually end the current innings (End Innings button)."""
+        if self.status == "COMPLETED":
+            return {"error": "Match already completed", **self.get_state()}
+        if self.innings_break:
+            return self.get_state()
+        if self.current_innings == 1:
+            self._close_first_innings()
+        else:
+            self._finish_match()
+        self.history = []
+        return self.get_state()
+
     def _check_match_completion(self):
         max_balls = self.total_overs * 6
         if self.current_innings == 1:
             if self.wickets >= 10 or self.balls >= max_balls:
-                self.target = self.runs + 1
-                update_match_status(self.match_id, current_innings=2, target=self.target)
+                self._close_first_innings()
         elif self.current_innings == 2:
-            if self.runs >= self.target:
-                self.status = "COMPLETED"
-                chasing_team = self.team2 if self.toss_decision == "BAT" else self.team1
-                self.winner = f"{chasing_team} won by {10 - self.wickets} wickets"
-                update_match_status(self.match_id, status="COMPLETED", winner=self.winner)
-            elif self.wickets >= 10 or self.balls >= max_balls:
-                self.status = "COMPLETED"
-                defending_team = self.team1 if self.toss_decision == "BAT" else self.team2
-                margin = (self.target - 1) - self.runs
-                if margin == 0:
-                    self.winner = "Match Tied"
-                else:
-                    self.winner = f"{defending_team} won by {margin} runs"
-                update_match_status(self.match_id, status="COMPLETED", winner=self.winner)
+            if self.runs >= self.target or self.wickets >= 10 or self.balls >= max_balls:
+                self._finish_match()
 
     def _sync_db(self):
         for player, stats in self.batting.items():
@@ -308,7 +362,9 @@ class MatchEngine:
             "runs_this_over": self.runs_this_over,
             "status": self.status,
             "winner": self.winner,
-            "target": self.target
+            "target": self.target,
+            "innings_break": self.innings_break,
+            "first_innings": self.first_innings
         }
 
     def _restore_snapshot(self, snap):
@@ -325,6 +381,13 @@ class MatchEngine:
         self.status = snap["status"]
         self.winner = snap["winner"]
         self.target = snap["target"]
+        was_break = self.innings_break
+        self.innings_break = snap.get("innings_break", False)
+        self.first_innings = snap.get("first_innings")
+        if was_break and not self.innings_break and self.match_id:
+            update_match_status(self.match_id, current_innings=1, target=0)
+        if snap["status"] != "COMPLETED" and self.match_id:
+            update_match_status(self.match_id, status="LIVE", winner="")
 
     def get_state(self, over_completed=False):
         overs_formatted = f"{self.balls // 6}.{self.balls % 6}"
@@ -357,5 +420,9 @@ class MatchEngine:
             "over_deliveries": self.over_deliveries,
             "over_completed": over_completed,
             "status": self.status,
-            "winner": self.winner
+            "winner": self.winner,
+            "innings_break": self.innings_break,
+            "first_innings": self.first_innings,
+            "batting_team": self.batting_team() if self.team1 else "",
+            "bowling_team": self.bowling_team() if self.team1 else ""
         }

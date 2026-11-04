@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import TrajectoryOverlay from './TrajectoryOverlay';
 import { 
   UploadCloud, CheckCircle2, Film, Gauge, AlertTriangle, ShieldCheck, 
   Volume2, VolumeX, Zap, Loader2, Sparkles, Activity, Cpu, Play, Pause, 
@@ -35,30 +36,7 @@ export default function VideoUpload() {
 
   const DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1sEeM3oCp54qZ87t7_K_36-fSRxWE6vc5?usp=share_link";
 
-  const SAMPLE_VIDEOS = [
-    {
-      id: "day_pace",
-      title: "Daytime Pace Delivery",
-      speed: "94.6 km/h",
-      badge: "NO-BALL",
-      badgeColor: "#ff1744",
-      icon: "sun",
-      desc: "Fast delivery in bright daylight. Tracked cleanly from bowler release to batter.",
-      url: "/static/samples/sample_day_pace_94kmh.mp4",
-      filename: "WhatsApp Video 2026-08-15 at 11.45.15.mp4"
-    },
-    {
-      id: "night_spin",
-      title: "Nighttime Spin Delivery",
-      speed: "81.1 km/h",
-      badge: "LEG_SPIN",
-      badgeColor: "#00e676",
-      icon: "moon",
-      desc: "Floodlight bowling with sharp lateral drift (16.1 cm swing & leg-break deviation).",
-      url: "/static/samples/sample_night_spin_81kmh.mp4",
-      filename: "WhatsApp Video 2026-07-21 at 00.00.46.mp4"
-    }
-  ];
+  const SAMPLE_VIDEOS = [];
 
   const handleLoadSample = async (sample) => {
     try {
@@ -358,7 +336,7 @@ export default function VideoUpload() {
           marginBottom: '24px',
           boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35)'
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: SAMPLE_VIDEOS.length ? '16px' : 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{
                 width: '38px', height: '38px', borderRadius: '10px',
@@ -371,12 +349,6 @@ export default function VideoUpload() {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <h3 style={{ fontSize: '15px', fontWeight: '800', color: '#fff' }}>Sample Delivery Footage (Google Drive)</h3>
-                  <span style={{
-                    fontSize: '10px', fontWeight: '800', padding: '2px 8px', borderRadius: '10px',
-                    background: 'rgba(0, 242, 254, 0.15)', color: '#00f2fe', border: '1px solid rgba(0, 242, 254, 0.3)'
-                  }}>
-                    2 VERIFIED SAMPLES
-                  </span>
                 </div>
                 <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
                   Click "Load Video" on either sample to test bowling speed analysis instantly, or open the Drive folder.
@@ -402,7 +374,7 @@ export default function VideoUpload() {
           </div>
 
           {/* Sample Video Cards Grid */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
+          {SAMPLE_VIDEOS.length > 0 && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
             {SAMPLE_VIDEOS.map((sample) => {
               const isSelected = file && file.name === sample.filename;
               return (
@@ -497,7 +469,7 @@ export default function VideoUpload() {
                 </div>
               );
             })}
-          </div>
+          </div>}
         </div>
 
         <form onSubmit={handleUpload}>
@@ -762,6 +734,16 @@ export default function VideoUpload() {
                 <div style={{ fontSize: '24px', fontWeight: '900', color: '#00f2fe', marginTop: '4px' }}>
                   {result.detected_speed.toFixed(1)} <span style={{ fontSize: '14px' }}>km/h</span>
                 </div>
+                {result.analysis && result.analysis.speed_note && (
+                  <div style={{ fontSize: '11px', color: '#fbbf24', marginTop: '6px', lineHeight: 1.4 }}>
+                    ⚠ {result.analysis.speed_note}
+                  </div>
+                )}
+                {result.analysis && result.analysis.status === 'implausible_speed' && (
+                  <div style={{ fontSize: '11px', color: '#f87171', marginTop: '6px' }}>
+                    Ball tracked but speed could not be measured (raw {Number(result.analysis.speed_kmh_raw || 0).toFixed(0)} km/h).
+                  </div>
+                )}
               </div>
 
               {/* Angle of Deviation Card */}
@@ -968,6 +950,9 @@ export default function VideoUpload() {
                   }}
                   style={{ width: '100%', maxHeight: '480px', display: 'block', margin: '0 auto' }}
                 />
+                {videoSourceMode === 'processed' && result.overlay_mode === 'client' && result.overlay && (
+                  <TrajectoryOverlay videoRef={videoRef} overlay={result.overlay} />
+                )}
               </div>
 
               {/* Video Controls & Slow Motion Bar */}

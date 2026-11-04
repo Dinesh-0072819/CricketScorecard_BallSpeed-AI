@@ -48,7 +48,7 @@ class RoboflowClient:
                          or "cricket-ball-detector-vcricket-ball-detector-logic")
         self.model = os.getenv("ROBOFLOW_MODEL", "").strip()  # "project/version"
         self.long_side = int(os.getenv("ROBOFLOW_IMAGE_LONG_SIDE", "1280"))
-        self.jpeg_quality = int(os.getenv("ROBOFLOW_JPEG_QUALITY", "85"))
+        self.jpeg_quality = int(os.getenv("ROBOFLOW_JPEG_QUALITY", "80"))
         self.workers = int(os.getenv("ROBOFLOW_WORKERS", "8"))
         self.session = requests.Session()
         self.last_error: Optional[str] = None
@@ -86,6 +86,10 @@ class RoboflowClient:
     def detect_frame(self, frame: np.ndarray) -> Tuple[Optional[List[List[float]]], Optional[str]]:
         """Returns (detections, error). detections is None when the request failed."""
         b64, s = self._encode(frame)
+        return self.detect_encoded(b64, s)
+
+    def detect_encoded(self, b64: str, s: float) -> Tuple[Optional[List[List[float]]], Optional[str]]:
+        """Same as detect_frame for an image that is already JPEG+base64 encoded at scale s."""
         try:
             r = self._post(b64)
         except Exception as e:

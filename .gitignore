@@ -31,3 +31,6 @@ Video_sam/
 weights/*
 !weights/*.pt
 !weights/*.onnx
+
+# Session secret (generated)
+database/.secret_key

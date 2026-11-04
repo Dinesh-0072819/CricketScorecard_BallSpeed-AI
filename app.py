@@ -22,8 +22,11 @@ from flask import (
     send_from_directory,
     jsonify,
     request,
-    Response
+    Response,
+    session
 )
+import secrets
+import datetime as _dt
 
 import cv2
 import numpy as np
@@ -36,14 +39,147 @@ from ai.alarm import AlarmSystem
 from database.db_helper import init_db, add_run, get_runs
 from database.scorecard_db import init_scorecard_db, get_all_matches, get_scorecard_details, delete_match, clear_all_matches
 from ai.scorecard_engine import MatchEngine
+from database.user_db import (
+    init_user_db, create_user, create_guest_user, verify_user, get_user, add_speed_run, get_speed_runs,
+    set_match_owner, match_owned_by, get_user_matches, get_latest_live_match_id, clear_user_matches
+)
 
 # Initialize Database
-init_db()
+USE_MONGO = bool(os.getenv("MONGO_URI"))   # legacy global run log (optional)
+if USE_MONGO:
+    init_db()
 init_scorecard_db()
-
-active_match_engine = MatchEngine()
+init_user_db()
 
 app = Flask(__name__, static_folder="frontend/dist", static_url_path="")
+
+
+# ----------------------------------
+# Accounts & sessions
+# ----------------------------------
+
+def _load_secret_key():
+    key = os.getenv("SECRET_KEY")
+    if key:
+        return key
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database", ".secret_key")
+    try:
+        if os.path.exists(path):
+            with open(path) as f:
+                return f.read().strip()
+        key = secrets.token_hex(32)
+        with open(path, "w") as f:
+            f.write(key)
+        return key
+    except Exception:
+        return secrets.token_hex(32)
+
+
+app.config.update(
+    SECRET_KEY=_load_secret_key(),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+    PERMANENT_SESSION_LIFETIME=_dt.timedelta(days=30),
+)
+
+# Everything that reads or writes a user's data needs a login
+PROTECTED_PREFIXES = (
+    "/api/match", "/upload", "/analytics_data", "/save_live_run", "/save_config", "/process_frame",
+)
+
+
+def current_user_id():
+    return session.get("user_id")
+
+
+@app.before_request
+def require_login():
+    path = request.path
+    if path.startswith("/api/auth/"):
+        return None
+    if any(path.startswith(p) for p in PROTECTED_PREFIXES):
+        if not current_user_id():
+            return jsonify({"status": "error", "message": "Please log in", "auth_required": True}), 401
+    return None
+
+
+def _login(user):
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+
+
+@app.route("/api/auth/register", methods=["POST"])
+def api_register():
+    data = request.json or {}
+    user, err = create_user(data.get("username", ""), data.get("password", ""))
+    if err:
+        return jsonify({"status": "error", "message": err}), 400
+    _login(user)
+    return jsonify({"status": "success", "user": user})
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_login():
+    data = request.json or {}
+    user = verify_user(data.get("username", ""), data.get("password", ""))
+    if not user:
+        return jsonify({"status": "error", "message": "Wrong username or password"}), 401
+    _login(user)
+    return jsonify({"status": "success", "user": user})
+
+
+@app.route("/api/auth/guest", methods=["POST"])
+def api_guest():
+    user = create_guest_user()
+    if not user:
+        return jsonify({"status": "error", "message": "Could not start a guest session, try again"}), 500
+    _login(user)
+    session["is_guest"] = True
+    return jsonify({"status": "success", "user": user})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"status": "success"})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_me():
+    user = get_user(current_user_id())
+    if not user:
+        session.clear()
+        return jsonify({"logged_in": False})
+    return jsonify({"logged_in": True, "user": {"id": user["id"], "username": user["username"],
+                                                "is_guest": user["username"].lower().startswith("guest_")}})
+
+
+# One live match engine per user
+_engines = {}
+
+
+def _engine():
+    uid = current_user_id()
+    eng = _engines.get(uid)
+    if eng is None:
+        eng = MatchEngine()   # live state is in memory; finished/old matches stay in the user's history
+        _engines[uid] = eng
+    return eng
+
+
+def _record_speed(uid, speed, status, source, delivery_type=None):
+    if not uid or not speed:
+        return None
+    rid = add_speed_run(uid, speed, status, source=source, delivery_type=delivery_type)
+    if USE_MONGO:
+        try:
+            add_run(speed=speed, status=status)
+        except Exception:
+            pass
+    return rid
 
 
 # ----------------------------------
@@ -336,7 +472,7 @@ def save_live_run():
         status = "NO-BALL"
     
     if live_maximum_speed > 0:
-        run_id = add_run(speed=round(live_maximum_speed, 1), status=status)
+        run_id = _record_speed(current_user_id(), round(live_maximum_speed, 1), status, "live_camera")
         # Reset live maximum speed for the next run
         live_maximum_speed = 0.0
         live_trajectory_points = []
@@ -374,39 +510,40 @@ def camera_stats():
 # Upload Video & Progress Tracking
 # ----------------------------------
 
-PROGRESS_FILE = "/tmp/cricspeed_progress.json"
-GLOBAL_PROGRESS = {
-    "status": "idle",
-    "percent": 0,
-    "frame": 0,
-    "total_frames": 0,
-    "message": ""
-}
+IDLE_PROGRESS = {"status": "idle", "percent": 0, "frame": 0, "total_frames": 0, "message": ""}
+USER_PROGRESS = {}   # user_id -> progress dict (each user sees only their own upload)
 
-def write_progress(state):
-    global GLOBAL_PROGRESS
-    GLOBAL_PROGRESS = dict(state)
+
+def _progress_file(uid):
+    return f"/tmp/cricspeed_progress_u{uid}.json"
+
+
+def write_progress(state, uid=None):
+    uid = uid if uid is not None else current_user_id()
+    USER_PROGRESS[uid] = dict(state)
     try:
-        with open(PROGRESS_FILE, "w") as f:
+        with open(_progress_file(uid), "w") as f:
             import json as _json
             _json.dump(state, f)
     except Exception:
         pass
 
-def read_progress():
-    global GLOBAL_PROGRESS
-    if GLOBAL_PROGRESS.get("status") != "idle":
-        return GLOBAL_PROGRESS
+
+def read_progress(uid=None):
+    uid = uid if uid is not None else current_user_id()
+    data = USER_PROGRESS.get(uid)
+    if data and data.get("status") != "idle":
+        return data
     try:
-        if os.path.exists(PROGRESS_FILE):
-            with open(PROGRESS_FILE, "r") as f:
+        if os.path.exists(_progress_file(uid)):
+            with open(_progress_file(uid), "r") as f:
                 import json as _json
                 data = _json.load(f)
-                GLOBAL_PROGRESS = data
+                USER_PROGRESS[uid] = data
                 return data
     except Exception:
         pass
-    return GLOBAL_PROGRESS
+    return dict(IDLE_PROGRESS)
 
 @app.route("/upload_progress", methods=["GET"])
 def get_upload_progress():
@@ -414,11 +551,14 @@ def get_upload_progress():
 
 @app.route("/upload", methods=["POST"])
 def upload_video():
+    uid = current_user_id()
+    user_folder = os.path.join(app.config["UPLOAD_FOLDER"], f"u{uid}")
     try:
-        # Clear previous uploads to save space
-        if os.path.exists(app.config["UPLOAD_FOLDER"]):
-            for f in os.listdir(app.config["UPLOAD_FOLDER"]):
-                file_path = os.path.join(app.config["UPLOAD_FOLDER"], f)
+        # Clear this user's previous uploads to save space
+        os.makedirs(user_folder, exist_ok=True)
+        if os.path.exists(user_folder):
+            for f in os.listdir(user_folder):
+                file_path = os.path.join(user_folder, f)
                 try:
                     if os.path.isfile(file_path):
                         os.unlink(file_path)
@@ -446,17 +586,10 @@ def upload_video():
         base, ext = os.path.splitext(os.path.basename(file.filename))
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_") or "video"
         safe_name = f"{safe}_{int(_time.time())}{ext.lower() or '.mp4'}"
-        os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
-        input_path = os.path.join(
-            app.config["UPLOAD_FOLDER"],
-            safe_name
-        )
+        input_path = os.path.join(user_folder, safe_name)
 
         output_filename = "processed_" + os.path.splitext(safe_name)[0] + ".mp4"
-        output_path = os.path.join(
-            app.config["UPLOAD_FOLDER"],
-            output_filename
-        )
+        output_path = os.path.join(user_folder, output_filename)
 
         write_progress({
             "status": "uploading",
@@ -479,7 +612,7 @@ def upload_video():
 
         def run_analysis_in_background():
             def on_processing_progress(percent, frame, total_frames, message=""):
-                write_progress({
+                write_progress(uid=uid, state={
                     "status": "processing",
                     "percent": percent,
                     "frame": frame,
@@ -499,17 +632,19 @@ def upload_video():
 
                 # Save tracking record to database (fail-safe)
                 try:
-                    add_run(
-                        speed=result["speed"],
-                        status=result["status"]
-                    )
+                    _record_speed(uid, result["speed"], result["status"], "video",
+                                  result.get("delivery_type"))
                 except Exception as db_err:
                     print(f"Database save notice: {db_err}")
 
                 final_data = {
                     "status": "success",
-                    "video_url": f"/uploads/{output_filename}",
-                    "original_video_url": f"/uploads/{safe_name}",
+                    # fast cloud mode: no server-rendered video, the browser draws the overlay
+                    "video_url": (f"/uploads/u{uid}/{safe_name}" if result.get("overlay_mode") == "client"
+                                  else f"/uploads/u{uid}/{output_filename}"),
+                    "overlay_mode": result.get("overlay_mode", "server"),
+                    "overlay": result.get("overlay"),
+                    "original_video_url": f"/uploads/u{uid}/{safe_name}",
                     "detected_speed": float(result["speed"]),
                     "max_speed": max_speed,
                     "ball_status": result["status"],
@@ -527,7 +662,7 @@ def upload_video():
                     "ball_found": result.get("analysis", {}).get("status") == "ok"
                 }
 
-                write_progress({
+                write_progress(uid=uid, state={
                     "status": "done",
                     "percent": 100,
                     "frame": 0,
@@ -540,7 +675,7 @@ def upload_video():
                 import traceback
                 traceback.print_exc()
                 print(f"Background video processing error: {bg_err}")
-                write_progress({
+                write_progress(uid=uid, state={
                     "status": "error",
                     "percent": 0,
                     "frame": 0,
@@ -569,8 +704,10 @@ def upload_video():
 # Serve Uploaded & Sample Videos
 # ----------------------------------
 
-@app.route("/uploads/<filename>")
+@app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
+    if not filename.startswith(f"u{current_user_id()}/"):
+        return jsonify({"status": "error", "message": "Not found"}), 404
     return send_from_directory(
         app.config["UPLOAD_FOLDER"],
         filename
@@ -615,7 +752,7 @@ def get_sample_videos():
 
 @app.route("/analytics_data")
 def analytics_data():
-    runs = get_runs()
+    runs = get_speed_runs(current_user_id())
     total_runs = len(runs)
     
     if total_runs > 0:
@@ -785,8 +922,9 @@ def api_create_match():
     toss_winner = data.get("toss_winner", team1)
     toss_decision = data.get("toss_decision", "BAT")
     
-    match_id = active_match_engine.start_new_match(team1, team2, overs, toss_winner, toss_decision)
-    return jsonify({"status": "success", "match_id": match_id, "state": active_match_engine.get_state()})
+    match_id = _engine().start_new_match(team1, team2, overs, toss_winner, toss_decision)
+    set_match_owner(match_id, current_user_id())
+    return jsonify({"status": "success", "match_id": match_id, "state": _engine().get_state()})
 
 @app.route("/api/match/setup_innings", methods=["POST"])
 def api_setup_innings():
@@ -797,12 +935,12 @@ def api_setup_innings():
     target = int(data.get("target", 0))
     current_innings = int(data.get("current_innings", 1))
     
-    active_match_engine.setup_innings(striker, non_striker, bowler, target=target, current_innings=current_innings)
-    return jsonify({"status": "success", "state": active_match_engine.get_state()})
+    _engine().setup_innings(striker, non_striker, bowler, target=target, current_innings=current_innings)
+    return jsonify({"status": "success", "state": _engine().get_state()})
 
 @app.route("/api/match/state", methods=["GET"])
 def api_match_state():
-    return jsonify(active_match_engine.get_state())
+    return jsonify(_engine().get_state())
 
 @app.route("/api/match/ball", methods=["POST"])
 def api_record_ball():
@@ -816,48 +954,60 @@ def api_record_ball():
     # Check if live camera speed is available to link
     speed_kmh = float(data.get("speed_kmh", live_maximum_speed if live_maximum_speed > 0 else 0.0))
     
-    res = active_match_engine.record_delivery(
+    res = _engine().record_delivery(
         mode=mode, runs=runs, wicket_desc=wicket_desc,
         new_batsman=new_batsman, who_out=who_out, speed_kmh=speed_kmh
     )
     return jsonify(res)
 
+@app.route("/api/match/end_innings", methods=["POST"])
+def api_end_innings():
+    return jsonify(_engine().end_innings())
+
 @app.route("/api/match/undo", methods=["POST"])
 def api_match_undo():
-    res = active_match_engine.undo()
+    res = _engine().undo()
     return jsonify(res)
 
 @app.route("/api/match/swap_strike", methods=["POST"])
 def api_swap_strike():
-    active_match_engine.swap_batsmen()
-    return jsonify({"status": "success", "state": active_match_engine.get_state()})
+    _engine().swap_batsmen()
+    return jsonify({"status": "success", "state": _engine().get_state()})
 
 @app.route("/api/match/next_bowler", methods=["POST"])
 def api_next_bowler():
     data = request.json or {}
     bowler = data.get("bowler", "New Bowler")
-    active_match_engine.set_next_bowler(bowler)
-    return jsonify({"status": "success", "state": active_match_engine.get_state()})
+    _engine().set_next_bowler(bowler)
+    return jsonify({"status": "success", "state": _engine().get_state()})
 
 @app.route("/api/match/details/<int:match_id>", methods=["GET"])
 def api_match_details(match_id):
+    if not match_owned_by(match_id, current_user_id()):
+        return jsonify({"status": "error", "message": "Match not found"}), 404
     details = get_scorecard_details(match_id)
     return jsonify(details)
 
 @app.route("/api/matches", methods=["GET"])
 def api_matches_list():
-    matches = get_all_matches()
+    matches = get_user_matches(current_user_id())
     return jsonify(matches)
 
 @app.route("/api/match/delete/<int:match_id>", methods=["POST", "DELETE"])
 @app.route("/api/match/<int:match_id>", methods=["DELETE"])
 def api_delete_match(match_id):
+    if not match_owned_by(match_id, current_user_id()):
+        return jsonify({"status": "error", "message": "Match not found"}), 404
     delete_match(match_id)
+    eng = _engines.get(current_user_id())
+    if eng is not None and eng.match_id == match_id:
+        _engines.pop(current_user_id(), None)
     return jsonify({"status": "success", "message": f"Match {match_id} deleted."})
 
 @app.route("/api/matches/clear", methods=["POST"])
 def api_clear_matches():
-    clear_all_matches()
+    clear_user_matches(current_user_id())
+    _engines.pop(current_user_id(), None)
     return jsonify({"status": "success", "message": "All matches cleared."})
 
 # Fallback route for React Single Page Application (SPA)

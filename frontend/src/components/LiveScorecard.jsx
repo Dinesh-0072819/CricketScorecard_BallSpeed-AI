@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trophy, RotateCcw, Zap, AlertTriangle, ShieldCheck, UserCheck, Play, ArrowRightLeft, FileText, X } from 'lucide-react';
+import { Trophy, RotateCcw, Zap, AlertTriangle, ShieldCheck, UserCheck, Play, ArrowRightLeft, FileText, X, Flag, Target } from 'lucide-react';
 
 export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch }) {
   const [mode, setMode] = useState('NORMAL');
@@ -18,7 +18,11 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
   const [nextBowlerName, setNextBowlerName] = useState('');
 
   const [showFullScorecardModal, setShowFullScorecardModal] = useState(false);
+  const [showEndInningsModal, setShowEndInningsModal] = useState(false);
+  const [secondInnings, setSecondInnings] = useState({ striker: '', non_striker: '', bowler: '' });
+  const [startingSecond, setStartingSecond] = useState(false);
   const [fullDetails, setFullDetails] = useState(null);
+  const [scorecardInnings, setScorecardInnings] = useState(1);
 
   if (!matchState || !matchState.match_id) {
     return (
@@ -47,8 +51,46 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
   const {
     match_id, team1, team2, total_overs, current_innings, runs, wickets, overs,
     crr, rrr, target, remaining_runs, remaining_balls, striker, non_striker, bowler,
-    batting, bowling, over_deliveries, over_completed, status, winner
+    batting, bowling, over_deliveries, over_completed, status, winner,
+    innings_break, first_innings, batting_team, bowling_team
   } = matchState;
+
+  const battingTeamName = batting_team || (current_innings === 1 ? team1 : team2);
+  const bowlingTeamName = bowling_team || (current_innings === 1 ? team2 : team1);
+  const isLive = status !== 'COMPLETED' && !innings_break;
+  const isChasing = current_innings === 2 && !innings_break;
+  const wicketsLeft = Math.max(0, 10 - (wickets || 0));
+
+  const handleEndInnings = async () => {
+    try {
+      await fetch('/api/match/end_innings', { method: 'POST' });
+      setShowEndInningsModal(false);
+      setShowBowlerModal(false);
+      onRefresh();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleStartSecondInnings = async (e) => {
+    e.preventDefault();
+    const { striker: s1, non_striker: s2, bowler: b1 } = secondInnings;
+    if (!s1.trim() || !s2.trim() || !b1.trim()) return;
+    setStartingSecond(true);
+    try {
+      await fetch('/api/match/setup_innings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ striker: s1.trim(), non_striker: s2.trim(), bowler: b1.trim(), current_innings: 2 })
+      });
+      setSecondInnings({ striker: '', non_striker: '', bowler: '' });
+      onRefresh();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setStartingSecond(false);
+    }
+  };
 
   const handleRunPress = (r) => {
     if (wicketMode) {
@@ -90,7 +132,7 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
         body: JSON.stringify(payload)
       });
       const data = await res.json();
-      if (data.over_completed) {
+      if (data.over_completed && !data.innings_break && data.status !== 'COMPLETED') {
         setShowBowlerModal(true);
       }
       onRefresh();
@@ -154,6 +196,7 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
       const res = await fetch(`/api/match/details/${match_id}`);
       const data = await res.json();
       setFullDetails(data);
+      setScorecardInnings(matchState && matchState.current_innings === 2 && !matchState.innings_break ? 2 : 1);
       setShowFullScorecardModal(true);
     } catch (e) {
       console.error(e);
@@ -198,7 +241,7 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
               Innings {current_innings} • {total_overs} Overs Match
             </span>
             <h2 style={{ fontSize: '28px', fontWeight: '900', marginTop: '10px' }}>
-              {current_innings === 1 ? team1 : team2}
+              {battingTeamName}
             </h2>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', marginTop: '4px' }}>
               <span style={{ fontSize: '56px', fontWeight: '900', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>
@@ -219,11 +262,13 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
             }}>
               VS
             </div>
-            {current_innings === 2 ? (
+            {innings_break ? (
+              <span style={{ fontSize: '13px', color: '#ffab00', fontWeight: '800' }}>Innings Break</span>
+            ) : current_innings === 2 ? (
               <div>
                 <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' }}>Target: {target}</span>
                 <div style={{ fontSize: '20px', fontWeight: '900', color: '#00e676', marginTop: '4px' }}>
-                  Need {remaining_runs} in {remaining_balls}b
+                  {status === 'COMPLETED' ? 'Chase over' : `Need ${remaining_runs} in ${remaining_balls}b`}
                 </div>
               </div>
             ) : (
@@ -263,8 +308,60 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
             >
               <FileText size={16} /> View Full Scorecard
             </button>
+
+            {isLive && (
+              <button
+                onClick={() => setShowEndInningsModal(true)}
+                className="btn-action"
+                style={{
+                  padding: '8px 18px', fontSize: '13px',
+                  borderColor: 'rgba(255, 171, 0, 0.5)', background: 'rgba(255, 171, 0, 0.12)', color: '#ffab00',
+                  display: 'flex', alignItems: 'center', gap: '8px'
+                }}
+              >
+                <Flag size={16} /> End Innings
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Target & Chase Equation Strip */}
+        {(current_innings === 2 || innings_break) && first_innings && (
+          <div style={{
+            marginTop: '24px', padding: '16px 20px', borderRadius: '14px',
+            background: 'linear-gradient(90deg, rgba(0, 230, 118, 0.12) 0%, rgba(0, 242, 254, 0.08) 100%)',
+            border: '1px solid rgba(0, 230, 118, 0.35)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <Target size={22} color="#00e676" />
+              <div>
+                <div style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '800', letterSpacing: '1px' }}>
+                  {first_innings.team} {first_innings.runs}/{first_innings.wickets} ({first_innings.overs} ov) • Target {target}
+                </div>
+                <div style={{ fontSize: '18px', fontWeight: '900', color: '#ffffff', marginTop: '2px' }}>
+                  {innings_break
+                    ? <>{bowlingTeamName === first_innings.team ? battingTeamName : (first_innings.team === team1 ? team2 : team1)} need <span style={{ color: '#00e676' }}>{target}</span> runs from <span style={{ color: '#00f2fe' }}>{total_overs * 6}</span> balls</>
+                    : status === 'COMPLETED'
+                      ? <span style={{ color: '#00e676' }}>{winner}</span>
+                      : <>{battingTeamName} need <span style={{ color: '#00e676' }}>{remaining_runs}</span> run{remaining_runs === 1 ? '' : 's'} from <span style={{ color: '#00f2fe' }}>{remaining_balls}</span> ball{remaining_balls === 1 ? '' : 's'}</>}
+                </div>
+              </div>
+            </div>
+            {isChasing && status !== 'COMPLETED' && (
+              <div style={{ display: 'flex', gap: '20px', fontFamily: 'var(--font-mono)' }}>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '800' }}>REQ. RR</div>
+                  <div style={{ fontSize: '18px', fontWeight: '900', color: '#ffab00' }}>{rrr}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '800' }}>WKTS LEFT</div>
+                  <div style={{ fontSize: '18px', fontWeight: '900', color: '#ff1744' }}>{wicketsLeft}</div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Current Over Deliveries Ticker Strip */}
         <div style={{
@@ -389,7 +486,52 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
         </div>
       </div>
 
+      {/* Innings Break: set up the chase */}
+      {innings_break && status !== 'COMPLETED' && (
+        <div className="glass-panel glass-panel-neon" style={{ padding: '32px', marginBottom: '28px', borderColor: 'rgba(255, 171, 0, 0.45)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '6px' }}>
+            <Flag size={26} color="#ffab00" />
+            <h3 style={{ fontSize: '20px', fontWeight: '900', color: '#ffab00' }}>Innings Break</h3>
+          </div>
+          <p style={{ color: '#94a3b8', fontSize: '14px', marginBottom: '22px' }}>
+            {first_innings ? `${first_innings.team} finished on ${first_innings.runs}/${first_innings.wickets} in ${first_innings.overs} overs. ` : ''}
+            Target <b style={{ color: '#00e676' }}>{target}</b> from <b style={{ color: '#00f2fe' }}>{total_overs * 6}</b> balls.
+            Enter the openers for the chase:
+          </p>
+          <form onSubmit={handleStartSecondInnings}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '14px', marginBottom: '20px' }}>
+              {[
+                ['striker', 'Striker Batter', 'e.g. David Warner'],
+                ['non_striker', 'Non-Striker Batter', 'e.g. Travis Head'],
+                ['bowler', 'Opening Bowler', 'e.g. Jasprit Bumrah']
+              ].map(([key, label, ph]) => (
+                <div key={key}>
+                  <label style={{ fontSize: '11px', color: '#94a3b8', display: 'block', marginBottom: '8px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '1px' }}>{label}</label>
+                  <input
+                    type="text" required placeholder={ph}
+                    value={secondInnings[key]}
+                    onChange={(e) => setSecondInnings({ ...secondInnings, [key]: e.target.value })}
+                    className="input-premium" style={{ width: '100%' }}
+                  />
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: '14px' }}>
+              <button type="button" onClick={handleUndo} className="btn-action btn-danger"
+                style={{ padding: '16px 20px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}
+                title="The innings ended on the last ball by mistake? Undo it.">
+                <RotateCcw size={16} /> Undo last ball
+              </button>
+              <button type="submit" disabled={startingSecond} className="btn-action btn-gradient" style={{ flex: 1, padding: '16px', fontSize: '15px', fontWeight: '900' }}>
+                {startingSecond ? 'Starting…' : 'Start 2nd Innings'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Interactive Ball Scoring Controller */}
+      {isLive && (
       <div className="glass-panel" style={{ padding: '32px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
           <h3 style={{ fontSize: '16px', fontWeight: '800', color: '#ffffff' }}>Scoring Controller Console</h3>
@@ -517,6 +659,7 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
           </button>
         </div>
       </div>
+      )}
 
       {/* Full Scorecard View Modal */}
       {showFullScorecardModal && fullDetails && (
@@ -541,61 +684,147 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
               </div>
             </div>
 
-            {/* Batting Card Full */}
-            <h3 style={{ fontSize: '16px', fontWeight: '800', color: '#00f2fe', marginBottom: '12px' }}>Batting Scorecard</h3>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginBottom: '28px' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: '#94a3b8' }}>
-                  <th style={{ paddingBottom: '8px' }}>Batsman</th>
-                  <th>Runs</th>
-                  <th>Balls</th>
-                  <th>4s</th>
-                  <th>6s</th>
-                  <th>Dismissal Details</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fullDetails.batting && fullDetails.batting.map((b) => (
-                  <tr key={b.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#ffffff' }}>
-                    <td style={{ padding: '10px 0', fontWeight: '700' }}>{b.player}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)' }}>{b.runs}</td>
-                    <td>{b.balls}</td>
-                    <td>{b.fours}</td>
-                    <td>{b.sixes}</td>
-                    <td style={{ color: b.out_desc === 'not out' ? '#00e676' : '#94a3b8', fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
-                      {b.out_desc}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {(() => {
+              // ---- split the scorecard by innings: each team bats once, the other team bowls ----
+              const m = fullDetails.match || {};
+              const tossWinner = m.toss_winner || team1;
+              const firstBat = m.toss_decision === 'BOWL' ? (tossWinner === team1 ? team2 : team1) : tossWinner;
+              const secondBat = firstBat === team1 ? team2 : team1;
+              const inningsList = [
+                { no: 1, bat: firstBat, bowl: secondBat },
+                { no: 2, bat: secondBat, bowl: firstBat }
+              ];
+              const summary = (no) => {
+                const balls = (fullDetails.balls || []).filter((b) => b.innings_no === no);
+                const runsT = balls.reduce((a, b) => a + (b.runs || 0), 0);
+                const wk = balls.filter((b) => b.wicket).length;
+                const legal = balls.filter((b) => b.extra_type !== 'Wide' && b.extra_type !== 'No Ball').length;
+                const extras = balls.filter((b) => b.extra_type).reduce((a, b) => {
+                  if (b.extra_type === 'Wide' || b.extra_type === 'No Ball') return a + 1 + (b.extra_type === 'Wide' ? Math.max(0, (b.runs || 0) - 1) : 0);
+                  return a + (b.runs || 0);
+                }, 0);
+                return { runs: runsT, wickets: wk, overs: `${Math.floor(legal / 6)}.${legal % 6}`, extras, played: balls.length > 0 };
+              };
+              const inn = inningsList.find((i) => i.no === scorecardInnings) || inningsList[0];
+              const bat = (fullDetails.batting || []).filter((b) => b.innings_no === inn.no);
+              const bowl = (fullDetails.bowling || []).filter((b) => b.innings_no === inn.no);
+              const sum = summary(inn.no);
 
-            {/* Bowling Card Full */}
-            <h3 style={{ fontSize: '16px', fontWeight: '800', color: '#ffab00', marginBottom: '12px' }}>Bowling Scorecard</h3>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: '#94a3b8' }}>
-                  <th style={{ paddingBottom: '8px' }}>Bowler</th>
-                  <th>Overs</th>
-                  <th>Maidens</th>
-                  <th>Runs</th>
-                  <th>Wickets</th>
-                  <th>Peak Speed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fullDetails.bowling && fullDetails.bowling.map((bw) => (
-                  <tr key={bw.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#ffffff' }}>
-                    <td style={{ padding: '10px 0', fontWeight: '700' }}>{bw.bowler}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)' }}>{`${Math.floor(bw.balls / 6)}.${bw.balls % 6}`}</td>
-                    <td>{bw.maidens}</td>
-                    <td>{bw.runs}</td>
-                    <td style={{ color: '#ff1744', fontWeight: '800' }}>{bw.wickets}</td>
-                    <td style={{ color: '#00f2fe', fontFamily: 'var(--font-mono)' }}>{bw.max_speed ? `${bw.max_speed.toFixed(1)} km/h` : '--'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              return (
+                <>
+                  {/* Team tabs */}
+                  <div style={{ display: 'flex', gap: '10px', marginBottom: '22px', flexWrap: 'wrap' }}>
+                    {inningsList.map((i) => {
+                      const sm = summary(i.no);
+                      const active = i.no === inn.no;
+                      return (
+                        <button key={i.no} onClick={() => setScorecardInnings(i.no)} className="btn-action"
+                          style={{
+                            flex: 1, minWidth: '200px', padding: '12px 16px', textAlign: 'left',
+                            borderColor: active ? '#00f2fe' : 'rgba(255,255,255,0.12)',
+                            background: active ? 'rgba(0, 242, 254, 0.15)' : 'rgba(255,255,255,0.04)',
+                            color: active ? '#00f2fe' : '#cbd5e1'
+                          }}>
+                          <div style={{ fontSize: '11px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '1px', color: '#94a3b8' }}>
+                            {i.no === 1 ? '1st' : '2nd'} Innings
+                          </div>
+                          <div style={{ fontSize: '16px', fontWeight: '900', marginTop: '2px' }}>
+                            {i.bat}{' '}
+                            <span style={{ fontFamily: 'var(--font-mono)', color: '#ffffff' }}>
+                              {sm.played ? `${sm.runs}/${sm.wickets}` : 'Yet to bat'}
+                            </span>
+                            {sm.played && <span style={{ fontSize: '12px', color: '#94a3b8', fontFamily: 'var(--font-mono)' }}> ({sm.overs} ov)</span>}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Batting of the selected team */}
+                  <h3 style={{ fontSize: '16px', fontWeight: '800', color: '#00f2fe', marginBottom: '12px' }}>
+                    {inn.bat} Batting
+                  </h3>
+                  {bat.length === 0 ? (
+                    <p style={{ color: '#64748b', fontSize: '13px', fontStyle: 'italic', marginBottom: '28px' }}>{inn.bat} have not batted yet.</p>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginBottom: '10px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: '#94a3b8' }}>
+                          <th style={{ paddingBottom: '8px' }}>Batsman</th>
+                          <th>Runs</th>
+                          <th>Balls</th>
+                          <th>4s</th>
+                          <th>6s</th>
+                          <th>S/R</th>
+                          <th>Dismissal Details</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bat.map((b) => (
+                          <tr key={b.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#ffffff' }}>
+                            <td style={{ padding: '10px 0', fontWeight: '700' }}>{b.player}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{b.runs}</td>
+                            <td>{b.balls}</td>
+                            <td>{b.fours}</td>
+                            <td>{b.sixes}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{b.balls > 0 ? ((b.runs / b.balls) * 100).toFixed(1) : '0.0'}</td>
+                            <td style={{ color: b.out_desc === 'not out' ? '#00e676' : '#94a3b8', fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                              {b.out_desc}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  {bat.length > 0 && (
+                    <div style={{
+                      display: 'flex', justifyContent: 'space-between', padding: '10px 0', marginBottom: '28px',
+                      borderTop: '1px solid rgba(255,255,255,0.1)', fontSize: '13px'
+                    }}>
+                      <span style={{ color: '#94a3b8' }}>Extras: <b style={{ color: '#fff' }}>{sum.extras}</b></span>
+                      <span style={{ fontWeight: '900', fontFamily: 'var(--font-mono)' }}>
+                        Total: {sum.runs}/{sum.wickets} <span style={{ color: '#94a3b8' }}>({sum.overs} ov)</span>
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Bowling of the other team */}
+                  <h3 style={{ fontSize: '16px', fontWeight: '800', color: '#ffab00', marginBottom: '12px' }}>
+                    {inn.bowl} Bowling
+                  </h3>
+                  {bowl.length === 0 ? (
+                    <p style={{ color: '#64748b', fontSize: '13px', fontStyle: 'italic' }}>{inn.bowl} have not bowled yet.</p>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left', color: '#94a3b8' }}>
+                          <th style={{ paddingBottom: '8px' }}>Bowler</th>
+                          <th>Overs</th>
+                          <th>Maidens</th>
+                          <th>Runs</th>
+                          <th>Wickets</th>
+                          <th>Econ</th>
+                          <th>Peak Speed</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bowl.map((bw) => (
+                          <tr key={bw.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#ffffff' }}>
+                            <td style={{ padding: '10px 0', fontWeight: '700' }}>{bw.bowler}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{`${Math.floor(bw.balls / 6)}.${bw.balls % 6}`}</td>
+                            <td>{bw.maidens}</td>
+                            <td>{bw.runs}</td>
+                            <td style={{ color: '#ff1744', fontWeight: '800' }}>{bw.wickets}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{bw.balls > 0 ? (bw.runs / (bw.balls / 6)).toFixed(2) : '0.00'}</td>
+                            <td style={{ color: '#00f2fe', fontFamily: 'var(--font-mono)' }}>{bw.max_speed ? `${bw.max_speed.toFixed(1)} km/h` : '--'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -665,8 +894,38 @@ export default function LiveScorecard({ matchState, onRefresh, onOpenNewMatch })
         </div>
       )}
 
+      {/* End Innings Confirmation Modal */}
+      {showEndInningsModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(16px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+        }}>
+          <div className="glass-panel" style={{ width: '440px', padding: '32px', borderColor: 'rgba(255, 171, 0, 0.5)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+              <Flag size={24} color="#ffab00" />
+              <h3 style={{ fontSize: '20px', fontWeight: '900', color: '#ffab00' }}>
+                End {current_innings === 1 ? '1st' : '2nd'} Innings?
+              </h3>
+            </div>
+            <p style={{ fontSize: '14px', color: '#94a3b8', marginBottom: '24px', lineHeight: 1.6 }}>
+              {current_innings === 1
+                ? <>{battingTeamName} finish on <b style={{ color: '#fff' }}>{runs}/{wickets}</b> ({overs} ov). {bowlingTeamName} will need <b style={{ color: '#00e676' }}>{runs + 1}</b> to win.</>
+                : <>The match will end now with {battingTeamName} on <b style={{ color: '#fff' }}>{runs}/{wickets}</b> chasing {target}.</>}
+            </p>
+            <div style={{ display: 'flex', gap: '14px' }}>
+              <button onClick={() => setShowEndInningsModal(false)} className="btn-action" style={{ flex: 1, padding: '14px' }}>Cancel</button>
+              <button onClick={handleEndInnings} className="btn-action"
+                style={{ flex: 1, padding: '14px', borderColor: '#ffab00', background: 'rgba(255, 171, 0, 0.2)', color: '#ffab00', fontWeight: '900' }}>
+                End Innings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Bowler Switch Modal */}
-      {showBowlerModal && (
+      {showBowlerModal && isLive && (
         <div style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(16px)',

@@ -34,8 +34,9 @@ Accuracy: +/-1 frame at each end, so about +/-5% at 60 fps.
 The ball's apparent size gives metres-per-pixel at its depth, so sideways movement is measured
 in metres. The along-pitch distance comes from time. Deviation is measured relative to the
 delivery line, so camera offset and angle cancel out.
-* **Swing** = sideways curve in the air before the bounce (threshold `SWING_MIN_M`, 8 cm)
-* **Spin** = change of direction at the bounce (threshold `TURN_MIN_DEG`, 2.0 deg)
+* **Swing** = deviation before pitching of 1 cm or more (`SWING_MIN_M`): towards = INSWING, away = OUTSWING
+* **Spin** = deviation after pitching of 0.5 deg or more (`TURN_MIN_DEG`): towards the batsman = OFF_SPIN, away = LEG_SPIN. Checked first.
+* **Straight** = turn under 0.5 deg AND swing under 1 cm. With such small minimums, camera jitter can label some straight balls; raise `TURN_MIN_DEG` to 1.0 and `SWING_MIN_M` to 0.04 for fewer false calls.
 * Right-handed batsman: towards leg = INSWING / OFF_SPIN, away = OUTSWING / LEG_SPIN; mirrored for left-handers.
 
 Best camera position: behind the batsman's stumps, in line with the pitch, phone upright, 60 fps.

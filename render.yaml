@@ -16,3 +16,17 @@ services:
         value: "false"
       - key: MONGO_URI
         sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: PITCH_LENGTH_M
+        value: "20.12"
+      - key: USE_ROBOFLOW_CLOUD
+        value: "true"
+      - key: ROBOFLOW_API_KEY
+        sync: false
+      - key: ROBOFLOW_MODEL
+        sync: false
+      - key: CLOUD_FAST
+        value: "true"

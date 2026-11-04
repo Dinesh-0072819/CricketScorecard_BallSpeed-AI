@@ -13,6 +13,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 from ai.delivery_analysis import analyze_delivery, analyze_video_track  # noqa: E402
 from ai.trajectory import link_detections, select_delivery, trim_delivery  # noqa: E402
 from synthetic_delivery import simulate  # noqa: E402
+import ai.delivery_analysis as DA  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def strict_thresholds(monkeypatch):
+    """Accuracy tests on noisy simulated video use noise-safe thresholds
+    (1.0 deg / 4 cm). The product defaults (0.5 deg / 1 cm) are tested separately."""
+    monkeypatch.setattr(DA, "TURN_MIN_DEG", 1.0)
+    monkeypatch.setattr(DA, "TURN_MIN_DEG_SLOW", 1.0)
+    monkeypatch.setattr(DA, "SWING_MIN_M", 0.04)
 
 
 def run(**kw):
@@ -52,8 +62,10 @@ def test_straight(seed):
 
 @pytest.mark.parametrize("seed", range(3))
 def test_inswing_outswing_rhb(seed):
-    assert run(swing_m=0.25, bounce_y=15, seed=seed)["delivery_type"] == "INSWING"
-    assert run(swing_m=-0.25, bounce_y=15, seed=seed)["delivery_type"] == "OUTSWING"
+    # the turn after pitching decides first, so a swinging ball may also show a small
+    # turn in the SAME direction: towards = INSWING/OFF_SPIN, away = OUTSWING/LEG_SPIN
+    assert run(swing_m=0.25, bounce_y=15, seed=seed)["delivery_type"] in ("INSWING", "OFF_SPIN")
+    assert run(swing_m=-0.25, bounce_y=15, seed=seed)["delivery_type"] in ("OUTSWING", "LEG_SPIN")
 
 
 def test_left_handed_batsman_mirrors():
@@ -106,3 +118,71 @@ def test_selects_delivery_not_static_ball_or_shot():
     track = trim_delivery(best.as_dicts())
     # ends at the last delivery point or the bat-contact point where the shot starts
     assert track[0]["frame"] <= 41 and 63 <= track[-1]["frame"] <= 68
+
+
+# ---------------------------------------------------------------- slow-ball spin
+@pytest.mark.parametrize("seed", range(4))
+def test_slow_spinner_small_turn(seed):
+    """Tennis-ball spinners turn the ball only 2-3 degrees at ~65 km/h."""
+    assert run(speed_kmh=65, turn_deg=3.0, seed=seed)["delivery_type"] == "OFF_SPIN"
+    assert run(speed_kmh=65, turn_deg=-3.0, seed=seed)["delivery_type"] == "LEG_SPIN"
+    assert run(speed_kmh=65, seed=seed)["delivery_type"] == "STRAIGHT"
+
+
+def test_trim_slow_ends_removes_hand_and_rolling():
+    from ai.video_processor import _trim_slow_ends
+    tr = [{"frame": i, "x": 300 + 0.5 * i, "y": 200, "size": 6, "conf": .3} for i in range(30)]
+    tr += [{"frame": 30 + k, "x": 315 - 3 * k, "y": 200 + 14 * k, "size": 6, "conf": .5} for k in range(1, 25)]
+    tr += [{"frame": 55 + k, "x": 243 - 0.3 * k, "y": 536 + 0.5 * k, "size": 15, "conf": .5} for k in range(15)]
+    out = _trim_slow_ends(tr)
+    assert 28 <= out[0]["frame"] <= 31 and out[-1]["frame"] == 54
+
+
+def test_bounce_gap_is_joined_not_cut():
+    """Linker splits the track at a sharp bounce; chaining + trim must keep both halves."""
+    W, H = 478, 850
+    diag = (W ** 2 + H ** 2) ** 0.5
+    dets = {}
+    for k in range(17):                       # release -> bounce, ball goes DOWN the screen
+        dets[18 + k] = [[286 - 5 * k, 385 + 12 * k, 7, 7, 0.6]]
+    for k in range(1, 8):                     # after bounce: goes UP the screen, keeps drifting left
+        dets[34 + k] = [[206 - 1.5 * k, 577 - 12 * k, 12, 12, 0.6]]
+    for k in range(1, 15):                    # shot: flies away from the batsman
+        dets[42 + k] = [[194 + 10 * k, 497 - 45 * k + k * k, 14 - 0.5 * k, 14 - 0.5 * k, 0.6]]
+    best = select_delivery(link_detections(dets, diag), diag)
+    track = trim_delivery(best.as_dicts(), diag, 30.0)
+    assert track[0]["frame"] <= 19 and 40 <= track[-1]["frame"] <= 43
+
+
+# ---------------------------------------------------------------- the product rule
+def _pitch_track(swing_m=0.0, turn_deg=0.0):
+    """Clean pitch-frame track: x lateral m (+ = RHB leg side), y along m, bounce at 10 m."""
+    import math
+    pts = []
+    for k in range(11):                                   # release -> bounce
+        d = float(k)
+        x = swing_m * 4 * (d / 10) * (1 - d / 10) * -1 + swing_m * 0   # bulge of swing_m
+        x = 4 * swing_m * (d / 10) ** 2 - 4 * swing_m * (d / 10) * 0  # curve towards +x late
+        pts.append({"x": x, "y": d, "py": 100 + 20 * d})
+    slope_pre = 8 * swing_m / 10
+    xb = pts[-1]["x"]
+    for k in range(1, 7):                                  # after bounce
+        d = 10 + k
+        ang = math.atan(slope_pre) + math.radians(turn_deg)
+        pts.append({"x": xb + math.tan(ang) * k, "y": d, "py": 300 - 10 * k})
+    return pts
+
+
+def test_rule_thresholds(monkeypatch):
+    monkeypatch.setattr(DA, "TURN_MIN_DEG", 0.5)
+    monkeypatch.setattr(DA, "TURN_MIN_DEG_SLOW", 0.5)
+    monkeypatch.setattr(DA, "SWING_MIN_M", 0.01)
+    a = DA.analyze_delivery
+    assert a(_pitch_track(turn_deg=0.8), batsman_hand="RIGHT")["delivery_type"] == "OFF_SPIN"
+    assert a(_pitch_track(turn_deg=-0.8), batsman_hand="RIGHT")["delivery_type"] == "LEG_SPIN"
+    assert a(_pitch_track(turn_deg=0.2), batsman_hand="RIGHT")["delivery_type"] == "STRAIGHT"
+    assert a(_pitch_track(swing_m=0.02), batsman_hand="RIGHT")["delivery_type"] == "INSWING"
+    assert a(_pitch_track(swing_m=-0.02), batsman_hand="RIGHT")["delivery_type"] == "OUTSWING"
+    assert a(_pitch_track(swing_m=0.004), batsman_hand="RIGHT")["delivery_type"] == "STRAIGHT"
+    # after-pitching deviation decides first
+    assert a(_pitch_track(swing_m=0.02, turn_deg=-1.0), batsman_hand="RIGHT")["delivery_type"] == "LEG_SPIN"

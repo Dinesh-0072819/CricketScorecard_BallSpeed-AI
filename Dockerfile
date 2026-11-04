@@ -26,9 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install lightweight PyTorch CPU wheel
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Upgrade pip (PyTorch not needed: ball detection runs on ONNX via onnxruntime)
+RUN pip install --no-cache-dir --upgrade pip
 
 # Install remaining Python dependencies
 COPY requirements.txt ./

@@ -1,7 +1,7 @@
 import React from 'react';
-import { Activity, Trophy, Upload, BarChart3, Radio, PlusCircle, History } from 'lucide-react';
+import { Activity, Trophy, Upload, BarChart3, Radio, PlusCircle, History, LogOut, CircleUser } from 'lucide-react';
 
-export default function Navbar({ activeTab, setActiveTab, liveCameraRunning, activeMatch, onOpenMatchModal }) {
+export default function Navbar({ activeTab, setActiveTab, liveCameraRunning, activeMatch, onOpenMatchModal, user, onLogout }) {
   const tabs = [
     { id: 'scorecard', label: 'Match Scorecard', icon: Trophy },
     { id: 'radar', label: 'AI Speed Radar', icon: Activity },
@@ -142,6 +142,24 @@ export default function Navbar({ activeTab, setActiveTab, liveCameraRunning, act
           <Radio size={14} className="live-dot" />
           YOLO RADAR READY
         </div>
+
+        {user && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 6px 6px 12px', borderRadius: '12px',
+            background: 'rgba(13, 20, 36, 0.6)', border: '1px solid rgba(255, 255, 255, 0.1)'
+          }}>
+            <CircleUser size={20} color="#00f2fe" />
+            <span style={{ fontSize: '13px', fontWeight: '800', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {user.username}
+            </span>
+            <button onClick={onLogout} title="Log out" className="btn-action" style={{
+              padding: '7px 10px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px',
+              borderColor: 'rgba(255, 23, 68, 0.35)', color: '#ff6b81', background: 'rgba(255, 23, 68, 0.08)'
+            }}>
+              <LogOut size={14} /> Log Out
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

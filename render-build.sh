@@ -9,9 +9,7 @@ echo "========================================="
 # 1. Upgrade pip
 python -m pip install --upgrade pip
 
-# 2. Install lightweight CPU PyTorch (crucial for Render free tier memory & disk limits)
-echo "Installing PyTorch CPU wheels..."
-pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 2. (PyTorch not needed: ball detection runs on ONNX via onnxruntime)
 
 # 3. Install remaining Python backend dependencies
 echo "Installing Python dependencies..."
