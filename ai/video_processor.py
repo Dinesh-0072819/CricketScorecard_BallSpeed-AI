@@ -27,6 +27,8 @@ from ai.trajectory import chain_tracklets as _chains, link_detections, select_de
 from ai.utils import CalibrationManager
 
 CLOUD_FAST = os.getenv("CLOUD_FAST", "true").lower() == "true"   # Roboflow-only + browser overlay
+# Fast mode on a tiny server: re-run the (slow) local model when Roboflow finds nothing?
+LOCAL_FALLBACK = os.getenv("LOCAL_FALLBACK", "false").lower() == "true"
 SPEED_MIN_KMH = float(os.getenv("SPEED_MIN_KMH", "20"))
 SPEED_MAX_KMH = float(os.getenv("SPEED_MAX_KMH", "165"))
 
@@ -148,10 +150,27 @@ class VideoProcessor:
                 res = self._process_fast(fs, input_video, max_speed, batsman_hand, pitch_length_m, prog)
                 if res is not None:
                     return res
-                print("[FastCloud] Roboflow found no delivery in this video; using the local engine")
+                print("[FastCloud] Roboflow found no delivery in this video")
+                if not LOCAL_FALLBACK:
+                    # The local engine needs minutes on a 0.1-CPU free server (and can run out
+                    # of memory), so fast mode reports what Roboflow saw instead of stalling.
+                    msg = (f"Roboflow found the ball in only {fs.get('ball_frames', 0)} of "
+                           f"{fs.get('cloud_requests', 0)} frames, so no delivery could be tracked. "
+                           f"Roboflow returned: {fs.get('roboflow_seen', 'nothing')}.")
+                    res = self._empty_result(msg, max_speed)
+                    res["status"] = "BALL NOT FOUND"
+                    res["analysis"]["status"] = "ball_not_found"
+                    res["analysis"]["message"] = msg
+                    res["engine"] = fs.get("engine")
+                    return res
                 prog(3, 0, 0, "Cloud found no ball - re-checking with the local AI engine...")
             else:
-                print(f"[FastCloud] Roboflow unavailable ({fs.get('error')}); using the local engine")
+                print(f"[FastCloud] Roboflow unavailable ({fs.get('error')})")
+                if not LOCAL_FALLBACK:
+                    msg = f"Roboflow request failed: {fs.get('error')}. Check ROBOFLOW_API_KEY / model id."
+                    res = self._empty_result(msg, max_speed)
+                    res["analysis"]["message"] = msg
+                    return res
                 prog(3, 0, 0, "Roboflow unavailable - using the local AI engine...")
 
         if self.detector is None and not self.cloud.active:

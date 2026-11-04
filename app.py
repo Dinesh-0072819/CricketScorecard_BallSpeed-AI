@@ -630,6 +630,13 @@ def upload_video():
                     pitch_length_m=pitch_length_m
                 )
 
+                # Fast cloud mode: Roboflow found no ball / failed -> show why, don't stall
+                _msg = (result.get("analysis") or {}).get("message")
+                if _msg and not result.get("speed"):
+                    write_progress(uid=uid, state={"status": "error", "percent": 0, "frame": 0,
+                                                   "total_frames": 0, "message": _msg})
+                    return
+
                 # Save tracking record to database (fail-safe)
                 try:
                     _record_speed(uid, result["speed"], result["status"], "video",

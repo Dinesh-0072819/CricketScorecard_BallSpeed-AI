@@ -55,6 +55,9 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     stride = max(1, int(round(fps / SAMPLE_FPS)))
 
+    cloud.reset_stats()
+    s_enc = min(1.0, cloud.long_side / float(max(W, H, 1)))
+    sent_wh = (int(W * s_enc), int(H * s_enc)) if s_enc < 1 else (W, H)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=cloud.workers)
     futures = {}
     timestamps = []
@@ -67,7 +70,7 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
         timestamps.append(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
         if idx % stride == 0:
             b64, s = cloud._encode(frame)
-            futures[idx] = pool.submit(cloud.detect_encoded, b64, s)
+            futures[idx] = pool.submit(cloud.detect_encoded, b64, s, sent_wh)
         idx += 1
         # early health check on the first few requests: bail out fast if Roboflow is down
         if not health_checked and len(futures) >= 8:
@@ -88,6 +91,7 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
 
     dets: Dict[int, List[List[float]]] = {}
     fails = 0
+    low_conf = too_big = 0
     for i, fut in futures.items():
         res, err = fut.result()
         if res is None:
@@ -96,12 +100,18 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
             continue
         if res:
             cloud.max_conf_seen = max(getattr(cloud, "max_conf_seen", 0.0), max(d[4] for d in res))
-        dets[i] = BallDetector._filter([d for d in res if d[4] >= CONF], (H, W))
+        keep = [d for d in res if d[4] >= CONF]
+        low_conf += len(res) - len(keep)
+        dets[i] = BallDetector._filter(keep, (H, W))
+        too_big += len(keep) - len(dets[i])
     pool.shutdown(wait=True)
     raw_hits = sum(1 for i in futures if i in dets and dets[i])
     print(f"[FastCloud] {len(futures)} frames sent, {fails} failed, {raw_hits} with a ball detection"
           f", max confidence {getattr(cloud, 'max_conf_seen', 0.0):.2f}"
           f"{' | last error: ' + str(cloud.last_error) if fails else ''}")
+    seen = cloud.stats_text()
+    print(f"[FastCloud] Roboflow returned: {seen} | dropped {low_conf} below conf {CONF}, "
+          f"{too_big} too large/elongated for a ball (max {0.06 * max(W, H):.0f}px)")
     if futures and fails / len(futures) > 0.5:
         return {"ok": False, "error": cloud.last_error}
 
@@ -109,6 +119,7 @@ def cloud_fast_scan(video_path: str, cloud, progress: Optional[Callable[[int, in
         "ok": True, "fps": float(fps), "width": W, "height": H, "frames": idx, "stride": stride,
         "detections": dets, "timestamps": _clean_ts(timestamps, fps),
         "engine": "roboflow-cloud (fast)", "cloud_requests": len(futures), "scan_seconds": time.time() - t0,
+        "ball_frames": raw_hits, "roboflow_seen": seen,
     }
 
 

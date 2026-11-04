@@ -14,6 +14,8 @@ model was never used, so "ball detection failed". This client reports health so
 the caller can fall back to the local detector.
 """
 import base64
+import collections
+import threading
 import concurrent.futures
 import os
 from typing import Dict, List, Optional, Tuple
@@ -23,19 +25,45 @@ import numpy as np
 import requests
 
 
-def _find_predictions(obj) -> List[dict]:
-    """Recursively collect prediction dicts (x, y, width, height, confidence) from any response shape."""
+def _find_predictions(obj, img_wh=None) -> List[Tuple[dict, Optional[Tuple[float, float]]]]:
+    """
+    Recursively collect prediction dicts (x, y, width, height, confidence) from any
+    response shape (plain model endpoint or any workflow output layout).
+    Each prediction is returned with the (width, height) of the image its
+    coordinates refer to, when the response says so (Roboflow puts an
+    "image": {"width", "height"} next to every "predictions" list). A workflow
+    that resizes or crops the frame returns coordinates in *that* image, so the
+    caller needs this to map them back.
+    """
     found = []
     if isinstance(obj, dict):
-        if all(k in obj for k in ("x", "y", "width", "height")):
-            found.append(obj)
+        im = obj.get("image")
+        if isinstance(im, dict) and isinstance(im.get("width"), (int, float)) and isinstance(im.get("height"), (int, float)):
+            img_wh = (float(im["width"]), float(im["height"]))
+        if all(k in obj for k in ("x", "y", "width", "height")) and not isinstance(obj.get("x"), (dict, list)):
+            found.append((obj, img_wh))
         else:
-            for v in obj.values():
-                found += _find_predictions(v)
+            for k, v in obj.items():
+                if k == "image":
+                    continue
+                found += _find_predictions(v, img_wh)
     elif isinstance(obj, list):
         for v in obj:
-            found += _find_predictions(v)
+            found += _find_predictions(v, img_wh)
     return found
+
+
+def _shape(obj, depth=0):
+    """Short description of a JSON response layout, for the logs."""
+    if depth > 3:
+        return "..."
+    if isinstance(obj, dict):
+        return "{" + ", ".join(f"{k}: {_shape(v, depth + 1)}" for k, v in list(obj.items())[:8]) + "}"
+    if isinstance(obj, list):
+        return f"[{len(obj)}x {_shape(obj[0], depth + 1) if obj else ''}]"
+    if isinstance(obj, str):
+        return "str" if len(obj) > 40 else repr(obj)
+    return type(obj).__name__
 
 
 class RoboflowClient:
@@ -53,6 +81,27 @@ class RoboflowClient:
         self.session = requests.Session()
         self.last_error: Optional[str] = None
         self.active = self.enabled and bool(self.api_key)
+        self._lock = threading.Lock()
+        self.reset_stats()
+
+    # ------------------------------------------------------------- diagnostics
+    def reset_stats(self):
+        with getattr(self, "_lock", threading.Lock()):
+            self.class_stats = collections.OrderedDict()   # class -> [count, max_conf, max_box_px]
+            self.response_shape = None
+
+    def _note(self, cls, conf, box):
+        with self._lock:
+            st = self.class_stats.setdefault(cls, [0, 0.0, 0.0])
+            st[0] += 1
+            st[1] = max(st[1], conf)
+            st[2] = max(st[2], box)
+
+    def stats_text(self) -> str:
+        if not self.class_stats:
+            return "no objects at all"
+        return ", ".join(f"'{c}' x{n} (max conf {mc:.2f}, max size {mb:.0f}px)"
+                         for c, (n, mc, mb) in self.class_stats.items())
 
     @property
     def status(self) -> str:
@@ -86,10 +135,13 @@ class RoboflowClient:
     def detect_frame(self, frame: np.ndarray) -> Tuple[Optional[List[List[float]]], Optional[str]]:
         """Returns (detections, error). detections is None when the request failed."""
         b64, s = self._encode(frame)
-        return self.detect_encoded(b64, s)
+        h, w = frame.shape[:2]
+        return self.detect_encoded(b64, s, (int(w * s) if s < 1 else w, int(h * s) if s < 1 else h))
 
-    def detect_encoded(self, b64: str, s: float) -> Tuple[Optional[List[List[float]]], Optional[str]]:
-        """Same as detect_frame for an image that is already JPEG+base64 encoded at scale s."""
+    def detect_encoded(self, b64: str, s: float, sent_wh: Optional[Tuple[int, int]] = None
+                       ) -> Tuple[Optional[List[List[float]]], Optional[str]]:
+        """Same as detect_frame for an image that is already JPEG+base64 encoded at scale s.
+        sent_wh = (width, height) of the encoded image, used to undo any resize the workflow does."""
         try:
             r = self._post(b64)
         except Exception as e:
@@ -97,13 +149,38 @@ class RoboflowClient:
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}: {r.text[:160]}"
         try:
-            preds = _find_predictions(r.json())
+            js = r.json()
+            preds = _find_predictions(js)
         except Exception as e:
             return None, f"Bad JSON: {e}"
+        if self.response_shape is None:
+            self.response_shape = _shape(js)
+            print(f"[Roboflow] response layout: {self.response_shape[:600]}")
+
+        # a multi-class model / workflow: keep only the ball class when there is one
+        names = [str(p.get("class", p.get("class_name", "")) or "") for p, _ in preds]
+        has_ball_class = any("ball" in n.lower() for n in names)
+
         dets = []
-        for p in preds:
-            conf = float(p.get("confidence", 0.5))
-            dets.append([p["x"] / s, p["y"] / s, p["width"] / s, p["height"] / s, conf])
+        for (p, img_wh), name in zip(preds, names):
+            try:
+                x, y, w, h = float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])
+            except (TypeError, ValueError):
+                continue
+            conf = float(p.get("confidence", 0.5) or 0.0)
+            if conf > 1.0:                       # percent
+                conf /= 100.0
+            # coordinates in a different image than the one we sent -> rescale
+            fx = fy = 1.0
+            if sent_wh and img_wh and img_wh[0] > 0 and img_wh[1] > 0:
+                fx, fy = sent_wh[0] / img_wh[0], sent_wh[1] / img_wh[1]
+            elif sent_wh and max(x, y, w, h) <= 1.5:   # normalised 0..1 coordinates
+                fx, fy = float(sent_wh[0]), float(sent_wh[1])
+            x, w, y, h = x * fx, w * fx, y * fy, h * fy
+            self._note(name or "?", conf, max(w, h) / s)
+            if has_ball_class and "ball" not in name.lower():
+                continue
+            dets.append([x / s, y / s, w / s, h / s, conf])
         return dets, None
 
     def detect_frames(self, frames: Dict[int, np.ndarray], progress=None) -> Tuple[Dict[int, List[List[float]]], float]:
